@@ -1,0 +1,290 @@
+---
+title: "Prueba de Evaluación R"
+author: "Marta Criado González"
+output:
+  pdf_document: 
+    fig_width: 6
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# EJERCICIO 1
+**a) Genera todos los números que entran en el sorteo de la ONCE y mostrarlos con los cuatro dígitos.**  
+
+Primero genero un vector con todos los numeros entre 0 y 999999. Obtengo las posiciones del vector que contengan números de 4 digitos (posicion 10000 porque el 0 también está incluído).  
+Formateo para que todos los números que tengan menos de 4 digitos se rellenen con ceros por la izquierda con la función `formatC`     
+```{r}
+lot_nums <- 0:999999
+formatted_lot_nums <- formatC(lot_nums[1:10000], width = 4, format = "d", flag = "0")
+```
+Algunos de los números que se generan son los siguientes
+```{r, echo=FALSE}
+sample(formatted_lot_nums, 20)
+```
+
+**b) ¿Cuál es la suma de los números de un boleto que más se repite?**  
+
+Genero la función `digitsum` para sumar los digitos de todos los números de cuatro digitos de lot_nums.  
+Aplico la función al vector y ordeno de manera descendente y me quedo con el primer elemento.  
+
+```{r}
+digitsum <- function(x) sum(floor(x / 10^(0:(nchar(x) - 1))) %% 10)
+list_of_sums <- sapply(lot_nums[1:10000], digitsum)
+most_freq_sum <-sort((list_of_sums),decreasing=TRUE)[1]
+```
+```{r}
+sprintf("La suma de los números que más se repite es el %f", most_freq_sum)
+```
+
+
+# EJERCICIO 2
+
+**a)Leer los archivos “datos_provincias.csv”, “CodProv.txt" y “CodCCAA.dat “. Añade el código de la comunidad autónoma al fichero “datos_provincias.csv” (no manualmente).**  
+
+He decidido utilizar la librería `ggplot2` para crear las gráficas de los apartados 3 y 4 porque es má sencillo mostrar varias variables aparte de ser más estética que las gráficas del paquete R base.
+```{r, message=FALSE,warning=FALSE}
+library(ggplot2)
+```
+
+Esta función lee los 3 ficheros con diferentes separadores ya que el fichero `CodCCAA.csv` tiene como separador el tabulador y los otros dos la coma. Para poder combinar los 3 dataframes resultantes es necesario añadir el prefijo 'ES-' a la columna *provincia_iso* del dataframe provincias. 
+Hay que realizar el mismo proceso con la columna *Comunidad Autónoma* 
+
+```{r}
+provincias_ccaa <- function(base_path){
+  prov <- read.table(paste(base_path,'datos_provincias.csv',sep=''),
+                     header=TRUE, encoding='UTF-8', sep=',')
+  prov$provincia_iso <- paste('ES-', prov$provincia_iso, sep='')
+
+  cod_prov <- read.table(paste(base_path,'CodProv.txt',sep=''), 
+                         header=TRUE, encoding='UTF-8', sep=',')
+  cod_prov$Comunidad.autónoma <- paste('ES-', cod_prov$Comunidad.autónoma, sep='')
+
+  cod_ccaa <- read.table(paste(base_path,'CodCCAA.csv',sep=''), header=TRUE, 
+                         encoding='UTF-8', sep='\t')
+
+  
+  df_cod_prov <- merge(x=prov, y=cod_prov, 
+                       by.x='provincia_iso', by.y='Código')
+  merged <- merge(x=df_cod_prov, y=cod_ccaa, by.x='Comunidad.autónoma', by.y='Código')
+  return (merged)
+}
+```
+
+**b) Selecciona los datos de la comunidad autónoma que te corresponda**  
+
+La función creada recibe el dataframe combinado resultante del primer apartado y el dni de una persona. Calcula la comunidad autónoma a la que pertenece con la operación $DNI mod 17$
+
+```{r}
+mi_ccaa <- function(dni, df){
+  ccaa <- dni%%17 
+  res <-subset(df, X==ccaa)
+  return (res)
+}
+```
+
+Finalmente se invocan las dos funciones anteriormente creadas con mi número de DNI  y se obtiene el dataframe final con los datos de la CCAA a la que pertenezco. En mi caso Baleares.  
+
+```{r}
+base_path <- './Datos/Cod_19/' # mi carpeta de trabajo
+df_provincias_ccaa <- provincias_ccaa(base_path)
+df_mi_ccaa <- mi_ccaa(50629869, df_provincias_ccaa)
+```
+
+**c) Realizar un gráfico que muestre adecuadamente la evolución de los casos nuevos. Justifica el gráfico elegido**  
+
+El gráfico que he elegido es un plot con una línea que muestra el número de casos por fecha ya que el número de casos no es acumulativo sino que solo se guardan los casos por día.  
+He usado `geomline` puesto que se puede apreciar de manera más intuitiva la evolución de casos.  
+He pasado a formato `date` la columna de la fecha para que la gráfica sea más clara. Con la función `scale_x_date` he generado steps de un mes para el eje X y he formateado las etiquetas para que solo se muestre el mes. 
+```{r}
+df_mi_ccaa$fecha <- as.Date(df_mi_ccaa$fecha, '%Y-%m-%d')
+```
+```{r grafico1, fig.align='center'}
+
+ggplot(df_mi_ccaa, aes( fecha, num_casos)) + 
+  geom_line(colour='red',size=0.9) + ylab("Casos") +
+  ggtitle("Numero de casos totales") +
+  scale_x_date(date_breaks="1 month", date_labels = "%b")
+
+```
+
+
+**d)Presenta en único gráfico la evolución de las distintas variables (columnas) por medio de un gráfico de líneas múltiples. Utiliza diferentes colores y añade una leyenda muestre el origen de cada línea.**  
+
+El proceso para incluir varias líneas en la misma gráfica es poner como eje X común la columna fecha y después ir añadiendo `geom_line` por cada variable que queramos mostrar. \textcolor{blue}{Otra opción sería añadir la función `melt` o `gather` para tener una columna con los valores y otra con el tipo de prueba al que perteneciera cada valor}
+
+Como se aprecia en la gráfica el número de pruebas por pcr es muy superior al del resto de pruebas. Una posible solución para visualizar todas las variables sería aplicar una escala logarítmica en el eje de ordenadas.
+
+```{r grafico2, fig.align='center'}
+ggplot(df_mi_ccaa, aes(fecha)) +
+  geom_line(aes(y = num_casos, colour='Casos totales')) +
+  geom_line(aes(y = num_casos_prueba_pcr, colour='PCR')) + 
+  geom_line(aes(y = num_casos_prueba_test_ac, colour='Anticuerpos')) + 
+  geom_line(aes(y = num_casos_prueba_otras, colour='Otras')) +
+  geom_line(aes(y = num_casos_prueba_desconocida, colour='Desconocida')) + 
+  scale_x_date(date_breaks="1 month", date_labels = "%b") +
+  labs(y="Número de casos", colour='Tipo pruebas') +
+  ggtitle("Evolución de los casos de COVID-19 por tipo de prueba")
+```
+
+Conclusiones obtenidas de la gráfica:  
+
+* El número de casos se incrementó entre los meses de Marzo y Abril llegando a un pico de algo más de 100 casos a mediados de Marzo.  
+* Desde la primera quincena de Agosto a principios del mes de Septiembre se registró el mayor crecimiento de casos de Covid-19 llegando a alcanzar los 350 casos por día a mediados de Agosto.  
+* La gran mayoría de casos fueron detectados por la prueba PCR, excepto un pequeño repunte de pruebas de Anticuerpos más visible entre los meses de Abril y Mayo  
+
+He optado por agrupar los datos por el mes de la columna fecha para poder visualizar mejor el resto de variables mostradas, pero no soluciona el problema ya que hay una variabilidad muy alta entre los datos de las distintos tipos de pruebas. Para poder agrupar por columna ha sido necesario importar la librería `tidyr`.
+
+```{r, message=FALSE,warning=FALSE}
+library(tidyr)
+
+# columna creada con el mes de la columna fecha
+df_mi_ccaa$month <- format(df_mi_ccaa$fecha, "%m")  
+
+df_bymonth <- aggregate(
+  cbind(num_casos, num_casos_prueba_pcr,num_casos_prueba_test_ac,
+        num_casos_prueba_otras,num_casos_prueba_desconocida)~month, 
+  data=df_mi_ccaa,
+  FUN=sum)
+```
+```{r, fig.align='center'}
+ggplot(df_bymonth, aes(month, group = 1)) +
+  geom_line(aes(y = num_casos, colour='Casos totales')) +
+  geom_line(aes(y = num_casos_prueba_pcr, colour='PCR')) + 
+  geom_line(aes(y = num_casos_prueba_test_ac, colour='Anticuerpos')) + 
+  geom_line(aes(y = num_casos_prueba_otras, colour='Otras')) +
+  geom_line(aes(y = num_casos_prueba_desconocida, colour='Desconocida')) +
+  labs(y="Número de casos", colour='Tipo pruebas') +
+  ggtitle("Evolución de los casos de COVID-19 por tipo de prueba agrupados por mes")
+```
+
+
+# EJERCICIO 3  
+
+**a)Importa el fichero de datos y guárdalo en un objeto de nombre punt. Comprueba la estructura del objeto punt. Si es necesario conviértelo en un data frame.**  
+Para poder importar un fichero SAS ha sido necesario instalar la librería `haven`  
+```{r, message=FALSE,warning=FALSE}
+require(haven)
+punt <- read_sas('./Datos/Punt.sas7bdat')
+```
+**b)Obtener una nueva variable overall que de la puntuación media de los cuatro test para cada estudiante suponiendo que el último test se pondera el doble.**  
+Ya que se realiza una media ponderada la fórmula que se utiliza es la siguiente, donde $w_{n}$ son los pesos de cada variable y $x_{n}$ es el dato.    
+$$\overline{x} = \frac{x_1*w_1 + ... + x_n*w_n}{w_1+....+w_n}$$
+
+Esta operación se puede realizar de manera vectorizada con la función `weighted.mean` de R base. Para poder aplicarla de manera vectorizada a todas las filas se añade la función `apply`.
+```{r}
+weights <- c((1/6), (1/6), (1/6), (1/2))
+punt$overall <- apply(punt[5:8], 1, weighted.mean, weights)
+```
+Una muestra (5 filas) del dataframe resultante con la columna overall.
+```{r, echo=FALSE}
+ knitr::kable(head(punt, n=5))
+```
+**c) Formar una nueva variable denominada start compuesta por el mes y día de ENROLLED y por el año corriente y presenta en pantalla las variables SEGSOC, COURSE y start**
+```{r}
+punt$start <- paste(punt$ENROLLED,format(Sys.Date(), "%Y"),sep='-')
+```
+Presento una muestra (6 elementos) de las variables indicadas en el enunciado  
+```{r, echo=FALSE}
+knitr::kable(head(punt[,c('SEGSOC','COURSE', 'start')], n=6))
+```
+
+
+**d) Formar un nuevo data frame de nombre level500 que contenga los estudiantes cuyo curso acaba en 500. Crear dos nuevas variables carácter, una de nombre subject con el código de curso (parte literal) y otra de nombre level con el número del curso (parte numérica).**  
+```{r}
+level500 <- subset(punt, substring(punt$COURSE, (nchar(punt$COURSE)-2))==500)
+level500$level <- substring(level500$COURSE, (nchar(level500$COURSE)-2))
+level500$subject <- substr(level500$COURSE, start=1, stop=(nchar(level500$COURSE)-3))
+```
+Presento una muestra (5 elementos) del dataframe final con las columnas que han estado involucradas en transformaciones en el ejercicio ('COURSE','level','subject','start', 'overall').  
+```{r, echo=FALSE}
+show_table <- level500[1:4,c('COURSE','level','subject','start', 'overall')]
+knitr::kable(show_table)
+```
+
+
+**e) Escribe la información de level500 en fichero ASCII de nombre “level500.dat”.**
+```{r}
+write.table(level500, file='level500.dat', sep=';')
+```
+
+## EJERCICIO 4  
+**a) Para la semana S_7, calcule el vector($f_{1},1-f_{1},f_{2},1-f_{2},f_{3},1-f_{3},f_{4},1-f_{4}$) donde $f_{i}$ es la frecuencia de la modalidad observada en la semana $S_{7}$ sobre los 16 sujetos.**  
+
+El primer paso es cargar la matriz del fichero `matriz.R`  
+```{r, echo=FALSE}
+matriz <- structure(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
+                      16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+                      1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+                      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 1, 1, 1, 3, 
+                      2, 1, 1, 1, 1, 1, 1, 2, 1, 4, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 
+                      2, 3, 3, 1, 2, 1, 1, 1, 1, 1, 3, 4, 1, 1, 1, 2, 3, 4, 3, 1, 2, 
+                      1, 1, 4, 1, 1, 4, 4, 1, 1), .Dim = c(16L, 8L))
+```
+
+
+* Aplico la función `tabulate` para calcular la frecuencia de cada valor en la columna **S7** (la última) con el argumento `nbins=4` para obtener la frecuencia=0 de los valores que no existen en la columna hasta 4. De esta manera todos los vectores tendrán el mismo tamaño.  
+
+* Aplico la función `rbind` para combinar el vector formado por las frecuencias con el formado por la resta de 1 - frecuencia.  
+* Divido entre el número total de sujetos que hay para poder obtener un valor normalizado de la frecuencia (entre 0 y 1).
+* Realizo la operación `as.numeric` para que el resultado sea una única fila
+
+```{r, echo=TRUE}
+freqs_s7 <- tabulate(matriz[,ncol(matriz)], nbins=4)/nrow(matriz)
+total_s7 <- as.numeric(rbind(freqs_s7, 1-freqs_s7))
+```
+```{r, echo=FALSE}
+ print(total_s7)
+```
+
+
+**b) Ahora, use la función `apply()` para hacer el mismo cálculo para todas las demás semanas. Almacene el resultado en una matriz** 
+
+Genero una funcion auxiliar para combinar los valores de las frecuencias con los valores (1- frecuencia).  
+El argumento de la funcion es la columna de valores del dataframe. 
+
+```{r}
+freq_cal <- function(col) {
+  result <- as.numeric(rbind(col, 1-col))
+  return (result)
+}
+```
+
+En este caso uso la funcion apply para poder aplicar `tabulate` y mi función `freq_cal` sobre las columnas $S_{i}$ 
+También ha sido necesario dividir entre el número de filas de la matriz original para normalizar los datos.
+```{r, echo=TRUE}
+freqs_matrix <- apply(matriz[,2:8],2, tabulate,nbins=4)
+freqs_matrix <- freqs_matrix/(nrow(matriz))
+matriz_result <- apply(freqs_matrix,2,freq_cal)
+```
+```{r, echo=FALSE}
+colnames(matriz_result) <- c('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7')
+knitr::kable(head(matriz_result))
+```
+
+**c) Utilice la función `barplot()` y el argumento `col = c ("black", "white")` en esta matriz. El gráfico que se obtiene ofrece una descripción general de la evolución de la `Sensación de ardor` con el tiempo.**  
+
+```{r, fig.align='center', fig.width=5, fig.height=4}
+barplot(matriz_result, col=c ("black", "white"))
+```
+
+En negro se puede apreciar la frecuencia de cada intensidad de ardor y en blanco el contrario.  
+Conclusiones de la gráfica y la tabla de valores:  
+* En la primera semana el 100% de los individuos tienen una sensación de ardor = 1  
+* En la cuarta semana ya vemos que este porcentaje baja hasta el 81% y empieza a haber individuos que califican una mayor sensación de ardor  
+* En la última semana tan solo el 50% de los inviduos tiene una sensación de ardor = 1  
+* Entre la secta y la séptima semana el porcentaje de individuos que tiene una sensación de ardor máxima (=4) se incrementa en casi un 20%  
+
+**d) Cambie el gráfico anterior para que las barras que representan las frecuencias estén en rojo. Los números de las semanas deben estar en azul y en la parte superior del gráfico en lugar del fondo. Los números de modalidad deben estar a la izquierda, en azul. Agrega un título al gráfico**  
+
+Para escribir un título se usa el argumento `main`. Para darle color a los ejes se utiliza `col.axis`. En el gráfico se muestra claramente como en la primera semana la sensación de ardor es más pequeña y en la última semana la sensación máxima de ardor es mayor. \textcolor{red}{Las conclusiones obtenidas en esta gráfica son las mismas que en el apartado anterior}
+```{r, fig.align='center', fig.width=5, fig.height=4}
+barplot(matriz_result, main="Evolución temporal de la sensación de ardor",
+        xlab="Semanas", ylab="Frecuencias", col= c("red", "white"), col.axis="blue")
+```
+
+
+
+
