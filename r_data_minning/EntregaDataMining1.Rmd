@@ -1,0 +1,621 @@
+---
+title: "EntregaDataMining1"
+output: pdf_document
+fontsize: 10pt
+author: Marta Criado Gonzalez
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(questionr)
+library(psych)
+library(car)
+library(corrplot)
+library(caret)
+library(ggplot2)
+library(lmSupport)
+library(unmarked)
+library(VGAM)
+library(pROC)
+library(glmnet)
+library(corrplot)
+library(readxl)
+library(jtools)
+source("FuncionesRosa.R")
+```
+```{r,warning=FALSE, message=FALSE}
+elecciones <- read_excel('DatosEleccionesEspania.xlsx')
+```
+
+
+## 1. Introducción al objetivo del problema y las variables implicadas.  
+El objetivo del problema es obtener, mediante una regresión lineal y una logística, una predicción de:
++ El porcentaje de abstenciones en las elecciones españolas  
++ Si el porcentaje de votos a la derecha supera el 30\%  
+Para ello, se usarán como variable objetivo el porcentaje de abstenciones en cada municipio español y
+una variable dicotómica que indica si el porcentaje de votos a la derecha es mayor de 30\% 
+
+## 2. Importación del conjunto de datos y asignación correcta de los tipos de variables.  
+En el momento de la importación todas las variables se consideran numéricas pero hay que cambiar el tipo a factor de las variables que se consideran categóricas: CCAA, CodigoProvincia, Derecha, ActividadPpal, Densidad  
+```{r}
+dropped_cols <- c(7:9,11)
+cleaned_elecciones <- as.data.frame(elecciones[,-dropped_cols])
+cuali_vars <- c('CodigoProvincia', 'CCAA', 'Derecha', 'ActividadPpal', 'Densidad')
+cleaned_elecciones[,cuali_vars] <- lapply(cleaned_elecciones[,cuali_vars], factor)
+```
+
+## 3. Análisis descriptivo de datos en el conjunto de training. Número de observaciones, número y naturaleza de variables, datos erróneos etc  
+```{r, echo=FALSE}
+summary(cleaned_elecciones)
+```
++ _ForeignersPtge_ contiene valores erróneos ya que no tiene sentido que este porcentaje tenga valores negativos. 
++ _SameComAutonPtge_ tiene un valor máximo de 127.16. El porcentaje de votantes que votan desde su misma comunidad autónoma no debería poder ser mayor que 100 puesto que excedería el total de votantes.  
++ _ActividadPpal_ tiene categorías pocos representativas ya que la suma de Construccion e Industria solo representa el 0.0033 del total. 
++ _Densidad_ contiene una categoría '?' que debe ser recategorizada como valor missing.  
++ _Explotaciones_ tiene un valor máximo de '99999' que debe ser analizado para poder tomar una decisión.  
+
+```{r results='hidden', message=FALSE, warning=FALSE}
+sapply(Filter(is.numeric, cleaned_elecciones),function(x) length(unique(x)))
+```
+No hay ninguna variable con un número de valores distintos muy pequeños, por tanto ninguna de las variables se considera categórica
+
+__Reparto de las categorias en las variables cualitativas__   
+
+Con la variable _CCAA_ ocurre lo mismo que en el caso de las provincias. Ceuta y Melilla carecen de representatividad por ello para que no haya problemas a la hora de generar el modelo, elimino estas dos CCAA.
+```{r, echo=FALSE, fig.width=7, fig.height=3, fig.align='center'}
+ggplot(cleaned_elecciones, aes(CCAA)) +
+  geom_bar(fill = "yellow")+theme(axis.text=element_text(size=7),
+        axis.title=element_text(size=10,face="bold"),axis.text.x = element_text(angle=90, hjust=1))
+```
+
+En la columna _ActividadPpal_ las categorías de Industria y Construccion están muy poco representadas, pero como están representadas en variables del conjunto de datos se decide no unificarlas.
+```{r, echo=FALSE}
+knitr::kable(freq(cleaned_elecciones$ActividadPpal, sort = 'inc'))
+```
+En la columna _Densidad_ el porcentaje de missing no es elevado, por tanto no se descartará la variable. El resto de categorías no precisan de ninguna modificación.
+```{r, echo=FALSE}
+knitr::kable(freq(cleaned_elecciones$Densidad, sort = 'inc'))
+```
+
+__Simetria y kurtosis de las variables cuantitativas__   
+
+Se detecta una asimetría muy elevada en las variables _Population_, _TotalCensus_, _totalEmpresas_, _Industria_, _Construccion_, _ComercTTEHosteleria_, _Servicios_, _inmuebles_, _Pob2010_. Esto también es visible comparando la media y la mediana de las variables puesto que son muy distintas en las variables más asimétricas.
+```{r, echo=FALSE}
+describe(cleaned_elecciones[,c('Population','TotalCensus','totalEmpresas','Industria',
+                               'Construccion','ComercTTEHosteleria','Servicios','inmuebles',
+                               'Pob2010'),])
+```
+
+
+## 4. Correción de los errores detectados  
+Se recodifica la categoría '?' de la variable _Densidad_ como missing  
+```{r, message=FALSE, warning=FALSE,results='hide'}
+cleaned_elecciones$Densidad<-recode.na(cleaned_elecciones$Densidad,"?")
+```
+Se remplaza el valor '99999' como valor missing en la variable _Explotaciones_
+```{r}
+cleaned_elecciones$Explotaciones<-replace(cleaned_elecciones$Explotaciones,
+                                          which(cleaned_elecciones$Explotaciones==99999),NA)
+```
+Se recodifican los valores fuera de rango en las variables _ForeignersPtge_ y _SameComAutonPtge_. Se eliminan las CCAA de Melilla y Ceuta porque carecen de representatividad.
+```{r}
+cleaned_elecciones$ForeignersPtge<-replace(cleaned_elecciones$ForeignersPtge, 
+                                           which((cleaned_elecciones$ForeignersPtge < 0)), NA)
+cleaned_elecciones$SameComAutonPtge<-replace(cleaned_elecciones$SameComAutonPtge,
+                                             which((cleaned_elecciones$SameComAutonPtge > 100)), NA)
+cleaned_elecciones<-cleaned_elecciones[!(cleaned_elecciones$CCAA=="Melilla" | 
+                                           cleaned_elecciones$CCAA=='Ceuta'),]
+
+```
+
+## 5. Análisis de valores atípicos. Decisiones  
+
+Primero se definen las variables objetivo continua y binaria. Tomo la decisión de eliminar la columna de _CodigoProvincia_ ya que hay colinealidad entre esta variable y la de _CCAA_ por tanto aportan la misma información. 
+```{r}
+varObjCont<-cleaned_elecciones$AbstentionPtge
+varObjBin<-cleaned_elecciones$Derecha
+input<-as.data.frame(cleaned_elecciones[,-c(1,6,8)])
+input <- input[,-1]
+```
+
+El mayor porcentaje de valores atípicos se encuentra en las variables _Otros_Pct_ (0.103), _totalEmpresas_ (0.104) y _Servicios_ (0.12)  
+El porcentaje de atípicos es demasiado bajo para realizar cualquier acción sobre ellos.
+```{r include=FALSE}
+sort(sapply(Filter(is.numeric, input),function(x) atipicosAmissing(x)[[2]])/nrow(input), decreasing=TRUE)
+```
+
+
+## 6. Análisis de valores perdidos. Imputaciones  
+Se genera una nueva columna que indica el porcentaje de valores perdidos que se encuentran en cada fila del conjunto de datos. 
+```{r, echo=FALSE}
+input$prop_missings<-apply(is.na(input),1,mean)
+```
+Como practicamente todas las variables tienen una asimetría muy elevada, la media no va a ser una medida útil para imputar los valores missing. Por este motivo, se imputan los missing con la mediana
+
+```{r}
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(
+  Filter(is.numeric, input),function(x) ImputacionCuant(x,"mediana"))
+
+input[,as.vector(which(sapply(input, class)=="factor"))]<-sapply(
+  Filter(is.factor, input),function(x) ImputacionCuali(x,"moda"))
+
+input[,as.vector(which(sapply(input, class)=="character"))] <- lapply(
+  input[,as.vector(which(sapply(input, class)=="character"))] , factor)
+```
+
+
+## 7. Transformaciones de variables y relaciones con las variables objetivo.  
+Para que se puedan apreciar mejor las etiquetas del eje x he modificado la función _graficoVcramer_ para que solo se muestren los VCramer mayores que 0.3.  Analizando el gráfico, la variable _CCAA_ es la más correlacionada con la variable objetivo binaria (que el porcentaje de votos a la derecha sea mayor que 30%)
+```{r, fig.width=5, fig.height=3, echo=FALSE, warning=FALSE, fig.align='center'}
+graficoVcramer(input,varObjBin,'Vcramer con VObjBin')
+```
+
+En cuanto a la variable continua, la variable que mayor correlación presenta es la CCAA. Pero la correlación es solo del 0.3 por tanto la relación no es muy elevada.
+
+```{r echo=FALSE, fig.height=3, message=FALSE, warning=FALSE}
+graficoVcramer(input,varObjCont,'Vcramer con VObjCont')
+```
+
+Como se aprecia en la siguiente gráfica, las columnas _Densidad_ y _ActividadPpal_ no influye en la variable objetivo binaria ya que la distribución de valores es uniforme para todas las categorías de estas columnas.
+
+```{r, fig.width=6, fig.height=3, echo=FALSE}
+mosaico_targetbinaria(input$ActividadPpal,varObjBin,"ActividadPpal")
+mosaico_targetbinaria(input$Densidad,varObjBin,"Densidad")
+```
+
+
+A continuación se analiza el efecto de las variables cuantitativas sobre la variable objetivo continua
+```{r, fig.height=4, fig.width=5, echo=FALSE}
+corrplot(cor(cbind(varObjCont,Filter(is.numeric, input)), use="pairwise", method="pearson"), method = "ellipse",type = "upper",tl.cex=0.5, order='hclust')
+```
+
+Las correlaciones positivas más altas se dan entre las columnas _Population_ , _TotalCensus_, _totalEmpresas_, _Industria_, _Construccion_, _ComercTTEHosteleria_, _Servicios_, _inmuebles_ y _Pob2010_  
+
+*Age_over65_pct* (porcentaje de votantes de más de 65 años) está negativamente correlacionado con el porcentaje del resto de edades y con el número de personas por inmueble. Es decir, a mayor cantidad de votantes de más de 65 años menor cantidad de personas por inmueble.
+*SameComAutonPtge* (porcentaje de votantes que pertenecen a la misma comunidad en la que votan) está inversamente correlacionado con el porcentaje de foráneos y de votantes que no pertenecen a la misma comunidad en la que votan. 
+
+## 8. Detección de las relaciones entre las variables input y objetivo
+Para realizar las transformaciones entre variables se hace uso de la función `TransfAuto`
+```{r}
+input_cont<-cbind(input,Transf_Auto(Filter(is.numeric, input),varObjCont))
+input_bin<-cbind(input,Transf_Auto(Filter(is.numeric, input),varObjBin))
+```
+
+## 9. Construccion del modelo de regresión lineal
+En primer lugar es necesario dividir el conjunto de datos en entrenamiento y test. Para el caso de la regresión lineal lo que se pretende estimar es una variable continua por ello la variable objetivo será el porcentaje de abstenciones.
+El conjunto de entrenamiento tendrá un 80% de los datos y el de test el 20% restantes.  
+```{r}
+df_continuo<-data.frame(input_cont,varObjCont)
+set.seed(123456)
+trainIndex <- createDataPartition(df_continuo$varObjCont, p=0.8, list=FALSE)
+data_train <- df_continuo[trainIndex,]
+data_test <- df_continuo[-trainIndex,]
+```
+
+
+### Selección de variables clásica
+Para poder realizar la selección clásica se genera un modelo mínimo con una sola variable al cual se le irán introduciendo variables y un modelo con todas las variables al cual se le irán eliminando variables. Utilizo las medidas AIC y BIC
+
+```{r}
+null<-lm(varObjCont~1, data=data_train) 
+full<-lm(varObjCont~., data=data_train[,c(1:34,66)]) 
+```
+```{r include=FALSE}
+modeloStepAIC<-step(null, scope=list(lower=null, upper=full), direction="both")
+modeloBackAIC<-step(full, scope=list(lower=null, upper=full), direction="backward")
+modeloStepBIC<-step(null, scope=list(lower=null, upper=full), direction="both",k=log(nrow(data_train)))
+modeloBackBIC<-step(full, scope=list(lower=null, upper=full), direction="backward",k=log(nrow(data_train)))
+```
+
+Los resultados de estos cuatro modelos son los mostrados en la siguiente tabla:
+```{r, warning=FALSE, message=FALSE, error=FALSE,echo=FALSE}
+
+results <- matrix(c(summary(modeloStepAIC)$r.squared,Rsq(modeloStepAIC,"varObjCont",data_test),
+                    length(coef(modeloStepAIC)),
+                    summary(modeloBackAIC)$r.squared,Rsq(modeloBackAIC,"varObjCont",data_test),
+                    length(coef(modeloBackAIC)),
+                    summary(modeloStepBIC)$r.squared,Rsq(modeloStepBIC,"varObjCont",data_test),
+                    length(coef(modeloStepBIC)),
+                    summary(modeloBackBIC)$r.squared,Rsq(modeloBackBIC,"varObjCont",data_test),
+                    length(coef(modeloBackBIC))
+                       ),ncol=3,byrow=TRUE)
+colnames(results) <- c("R2 train","R2 test","# parametros")
+rownames(results) <- c("Step AIC","Back AIC",
+                          "Step BIC","Back BIC")
+```
+```{r, echo=FALSE}
+results
+```
+Entre stepwise y backward no hay diferencia significativa ya que R2 tanto en train como en test es muy similar. La única diferencia es que hay menos parámetros con el método StepWise, por ello utilizamos este método en pasos posteriores.
+
+#### Modelo con las interacciones entre variables  
+Para poder mejorar el modelo genero interacciones entre variables. Entreno un modelo con las interacciones entre las variables originales y las variables originales.
+```{r}
+formInt<-formulaInteracciones(df_continuo[,c(1:34,66)],35)
+fullInt<-lm(formInt, data=data_train)
+```
+```{r include=FALSE}
+modeloStepBIC_int<-step(null, scope=list(lower=null, upper=fullInt), direction="both",k=log(nrow(data_train)),trace=0)
+modeloStepAIC_int<-step(null, scope=list(lower=null, upper=fullInt), direction="both",trace=0)
+```
+
+#### Modelo con todas las transformaciones y las variables originales
+El siguiente paso es entrenar un modelo que contenga las variables originales y las transformaciones de variables originales.
+```{r}
+fullT<-lm(varObjCont~., data=data_train)
+```
+
+```{r include=FALSE}
+modeloStepAIC_trans<-step(null, scope=list(lower=null, upper=fullT), direction="both",trace=0)
+modeloStepBIC_trans<-step(null, scope=list(lower=null, upper=fullT), direction="both", k=log(nrow(data_train)),trace=0)
+```
+
+#### Modelo con las interacciones y las transformaciones
+El último paso es entrenar un modelo que contenga las variables originales, las transformadas y las interacciones entre variables originales y entre variables transformadas
+```{r}
+formIntT<-formulaInteracciones(df_continuo,66)
+fullIntT<-lm(formIntT, data=data_train)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+modeloStepAIC_transInt<-step(null, scope=list(lower=null, upper=fullIntT), direction="both", trace=0)
+modeloStepBIC_transInt<-step(null, scope=list(lower=null, upper=fullIntT), direction="both",k=log(nrow(data_train)),trace=0)
+```
+
+La siguiente tabla ilustra los resultados de R2 en test y el numero de parametros de cada modelo entrenado.
+```{r, warning=FALSE, echo=FALSE}
+results_r2 <- matrix(c(Rsq(modeloStepAIC_int,"varObjCont",data_test),length(coef(modeloStepAIC_int)),
+                       Rsq(modeloStepBIC_int,"varObjCont",data_test),length(coef(modeloStepBIC_int)),
+                       Rsq(modeloStepAIC_trans,"varObjCont",data_test),length(coef(modeloStepAIC_trans)),
+                       Rsq(modeloStepBIC_trans,"varObjCont",data_test),length(coef(modeloStepBIC_trans)),
+                       Rsq(modeloStepAIC_transInt,"varObjCont",data_test),length(coef(modeloStepAIC_transInt)),
+                       Rsq(modeloStepBIC_transInt,"varObjCont",data_test),length(coef(modeloStepBIC_transInt))
+                       ),ncol=2,byrow=TRUE)
+colnames(results_r2) <- c("R2 en test","Numero de parametros")
+rownames(results_r2) <- c("Interacciones AIC","Interacciones BIC",
+                          "Transformaciones AIC","Transformaciones BIC",
+                          "Interacciones y Transformaciones AIC","Interacciones y Transformaciones BIC")
+```
+Como se puede apreciar, el modelo con el mejor resultado es el que incluye las interacciones y las transformaciones midiendo con AIC, pero el número de parámetros es muy superior al resto. Es probable que el mejor modelo sea el que solo incluye las transformaciones ya que tanto para BIC como para AIC tiene un R2 bastante elevado y el número de parámetros es razonable.
+```{r,echo=FALSE}
+results_r2
+```
+
+Por último pruebo todos los modelos con la validación cruzada para poder validar lo expuesto anteriormente. El modelo _modeloStepAIC_trans_ se descarta porque contiene demasiados parametros.
+```{r, echo=FALSE}
+total<-c()
+modelos<-sapply(list(modeloStepAIC,modeloStepBIC,modeloStepBIC_int,
+                     modeloStepAIC_trans,modeloStepBIC_trans,modeloStepBIC_transInt),formula)
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = data_train,
+             method = "lm",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      returnResamp="all")
+  )
+  total<-rbind(total,cbind(vcr$resample[,1:2],modelo=rep(paste("Modelo",i),
+                                                         nrow(vcr$resample))))
+}
+```
+Los tres modelos con mayor R2 son el modelo que incluye las variables transformadas medido con AIC(Modelo 4), el mismo medido con BIC (modelo5) y el modelo que incluye las transformadas y las interacciones medido con BIC(Modelo 6) como hemos podido ver en la tabla anterior.
+```{r, fig.height=3, fig.width=7, echo=FALSE, fig.align='center'}
+boxplot(Rsquared~modelo,data=total,main="R-Square") 
+```
+
+```{r, echo=FALSE}
+print('FORMULA PARA EL MODELO 6')
+formula(modeloStepBIC_transInt) 
+```
+
+El *modelo6* tiene una formula con muchas menos variables que los otros dos modelos, su R2 y su variabilidad son practicamente idénticos. La diferencia con los otros dos modelos es que utiliza una interacción entre el porcentaje de mujeres transformado y la variable categórica de ActividadPpal.
+
+__EL MEJOR DE LOS MODELOS POR SELECCIÓN CLÁSICA ES EL MODELO 6__
+
+### Selección de variables aleatoria
+Para la selección de variables aleatoria es necesario separar el conjunto de datos en submuestras y realizar una selección clásica de variables. Los modelos que más se repitan serán los ganadores.
+```{r, echo=FALSE, eval=FALSE}
+rep<-100
+prop<-0.7 # se realiza con el 70% de los datos de entrenamiento por velocidad. El resultado es el mismo.
+modelosGenerados<-c()
+for (i in 1:rep){
+  set.seed(12345+i)
+  subsample<-data_train[sample(1:nrow(data_train),prop*nrow(data_train),replace = T),]
+  full<-lm(formIntT,data=subsample)
+  null<-lm(varObjCont~1,data=subsample)
+  modeloAux<-step(null,scope=list(lower=null,upper=full),direction="both",trace=0,k=log(nrow(subsample)))
+  modelosGenerados<-c(modelosGenerados,paste(sort(unlist(strsplit(as.character(formula(modeloAux))[3]," [+] "))),collapse = "+"))
+}
+
+```
+Los tres modelos que más se repiten se incluyen en el siguiente apartado.
+
+### Selección del modelo ganador
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+total_modelos<-c()
+
+modelos_ganadores<-c(formula(modeloStepBIC_transInt),
+            "varObjCont ~ActividadPpal+ActividadPpal:WomanPopulationPtge+Age_over65_pct+CCAA+ Industria+inmuebles+logxServicios+logxTotalCensus+Otros_Pct+SameComAutonDiffProvPtge+
+            SameComAutonPtge+sqrtxAge_over65_pct+sqrtxSameComAutonDiffProvPtge+sqrtxSUPERFICIE+
+            sqrtxWomanPopulationPtge+WomanPopulationPtge",
+            "varObjCont~Age_0.4_Ptge+Age_over65_pct+CCAA+CCAA:Age_over65_pct+ ConstructionUnemploymentPtge+ForeignersPtge+Industria+logxServicios+logxTotalCensus+Otros_Pct+
+            PersonasInmueble+SameComAutonDiffProvPtge+SameComAutonPtge+sqrtxSameComAutonDiffProvPtge+
+            sqrtxSUPERFICIE+sqrtxWomanPopulationPtge+SUPERFICIE+UnemployMore40_Ptge+WomanPopulationPtge",
+            "varObjCont ~CCAA+CCAA:sqrtxSameComAutonDiffProvPtge+ConstructionUnemploymentPtge+ ForeignersPtge+Industria+logxPob2010+logxServicios+Otros_Pct+PersonasInmueble+PobChange_pct+
+            raiz4Otros_Pct+sqrtxAge_19_65_pct+sqrtxSameComAutonDiffProvPtge+sqrtxSUPERFICIE+
+            sqrtxWomanPopulationPtge+WomanPopulationPtge")
+for (i in 1:length(modelos_ganadores)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos_ganadores[[i]]), data = data_train,
+             method = "lm",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      returnResamp="all")
+  )
+  total_modelos<-rbind(total_modelos,cbind(vcr$resample[,1:2],modelo=rep(paste("Modelo",i),
+                                                         nrow(vcr$resample))))
+}
+```
+
+```{r, echo=FALSE,fig.height=3, fig.width=7}
+boxplot(Rsquared~modelo,data=total_modelos,main="R-Square")
+```
+Elijo el modelo1 porque tiene una variabilidad similar y un R2 muy similar al del resto de modelos, pero el numero de parametros es más bajo. Por el principio de parsimonia elijo el primer modelo.
+```{r}
+ModeloGanador<-lm(formula(modeloStepBIC_transInt), data=data_train)
+```
+### Interpretación de los coeficientes de dos variables incluidas en el modelo, una binaria y otra continua
+Vemos que las variables que más afectan al modelo son CCAA, TotalCensus y Otros_Pct. 
+Evaluaré el efecto de TotalCensus como variable continua y de ActividadPpal como variable cualitativa.
+```{r, fig.height=3, fig.width=7, echo=FALSE, message=FALSE}
+modeleffects<-modelEffectSizes(ModeloGanador)$Effects[-1,4]
+barplot(sort(modeleffects,decreasing =T),las=2,main="Importancia de las variables (R2)")
+```
+```{r, echo=FALSE}
+summary(ModeloGanador)
+```
+*ActividadPpal:* El porcentaje de abstenciones será mayor si la ActividadPpal es Industria o Servicios y menor si es Construcción u Otro. Es decir, en localidades donde la ActividadPpal sea Industria o Servicios el porcentaje de abstenciones será mayor, y en localidades donde la ActividadPpal sea Construcción u Otro el porcentaje de abstenciones será menor.
+
+*TotalCensus:* El porcentaje de abstenciones será menor si el censo aumenta. Es decir, cuanta más gente censada menor porcentaje de abstenciones.
+
+### Justificar porqué es el mejor modelo y medir la calidad del mismo
+
+Evaluamos la estabilidad del modelo a partir de las diferencias en train y test:
+```{r,echo=FALSE}
+Rsq(ModeloGanador,"varObjCont",data_train)
+Rsq(ModeloGanador,"varObjCont",data_test) 
+```
+He elegido este modelo porque el resultado tanto en train como en test es muy similar, lo cual indica que no habrá un sobreentrenamiento y que el modelo generalizará más o menos bien. Se elige por el principio de parsimonia ya que es el modelo con el menor número de parámetros y utiliza tanto interacciones entre variables como transformaciones.
+
+## 10. Construcción del modelo de regresión logística.
+```{r}
+df_binario<-data.frame(input_bin,varObjBin)
+set.seed(123456)
+trainIndex_bin <- createDataPartition(df_binario$varObjBin, p=0.8, list=FALSE)
+data_train_bin <- df_binario[trainIndex_bin,]
+data_test_bin <- df_binario[-trainIndex_bin,]
+```
+Mismo proceso que en la regresión lineal, pero con los datos input binarios y con la variable objetivo binaria.
+Por ello no es necesaria una explicación detallada.
+### Selección de variables clásica
+```{r, echo=FALSE}
+null_bin<-glm(varObjBin~1, data=data_train_bin,family=binomial) 
+full_bin<-glm(varObjBin~., data=data_train_bin[,c(1:34,66)],family=binomial) 
+modeloStepAIC_bin<-step(null_bin, scope=list(lower=null_bin, upper=full_bin), direction="both", trace=0)
+modeloBackAIC_bin<-step(full_bin, scope=list(lower=null_bin, upper=full_bin), direction="backward", trace=0)
+modeloStepBIC_bin<-step(null_bin, scope=list(lower=null_bin, upper=full_bin), direction="both",
+                        k=log(nrow(data_train_bin)), trace=0)
+modeloBackBIC_bin<-step(full_bin, scope=list(lower=null_bin, upper=full_bin), direction="backward",
+                        k=log(nrow(data_train_bin)), trace=0)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+results_bin <- matrix(c(pseudoR2(modeloStepAIC_bin,data_train_bin,"varObjBin"),length(coef(modeloStepAIC_bin)),
+                    pseudoR2(modeloBackAIC_bin,data_train_bin,"varObjBin"),length(coef(modeloBackAIC_bin)),
+                    pseudoR2(modeloStepBIC_bin,data_train_bin,"varObjBin"),length(coef(modeloStepBIC_bin)),
+                    pseudoR2(modeloBackBIC_bin,data_train_bin,"varObjBin"),length(coef(modeloBackBIC_bin)))
+                    ,ncol=2,byrow=TRUE)
+colnames(results_bin) <- c("R2 test","# parametros")
+rownames(results_bin) <- c("Step AIC","Back AIC","Step BIC","Back BIC")
+```
+El metodo Stepwise utiliza un número de parámetros menor y el R2 no varía de manera significativa con respecto al backward. Por ello se usará stepwise en los pasos posteriores. 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+results_bin
+```
+
+Realizo una gráfica para comprobar la importancia de cada variable en el modelo de regresión logística. De esta manera las variables con menor significación pueden ser descartadas. **He decido modificar la función para quedarme con las 10 mejores variables*
+```{r, results='hide', echo=FALSE, message=FALSE, warning=FALSE}
+impVariablesLog(full_bin,"varObjBin") 
+```
+
+Se procede a generar tres modelos más y analizarlos con la métrica AIC y BIC utilizando solo las variables significativas:  
+
++ Modelo con las interacciones entre variables originales y estas  
++ Modelo con las transformaciones de las variables originales y estas    
++ Modelo con con interacciones, transformaciones y variables originales  
+
+```{r, echo=FALSE}
+var_significativas <- c("CCAA","Otros_Pct","AgricultureUnemploymentPtge","xAgricultureUnemploymentPtge",
+                        "ActividadPpal","SUPERFICIE","PobChange_pct","Explotaciones","xPobChange_pct",
+                        "xExplotaciones","varObjBin")
+```
+
+```{r, message=FALSE, warning=FALSE, eval=FALSE}
+formInt_bin<-formulaInteracciones(df_binario[,var_significativas],11)
+fullInt_bin<-glm(formInt_bin, data=data_train_bin, family=binomial)
+```
+Ya que existe una variable que separa la variable objetivo perfectamente en 1's y 0's, se obtiene el mensaje de warning **glm.fit: fitted probabilities numerically 0 or 1 occurred** en el modelo ejecutado por tanto el algoritmo no converge. Decido hacer uso de la regresión de Lasso.
+
+```{r, message=FALSE, warning=FALSE}
+y <- as.double(as.matrix(data_train_bin[, 66]))
+x<-model.matrix(varObjBin~., data=data_train_bin)[,-1]
+set.seed(1712)
+cv.lasso <- cv.glmnet(x,y,nfolds=5, family='binomial',type.measure="auc")
+betas<-coef(cv.lasso, s=cv.lasso$lambda.1se)
+```
+```{r, message=FALSE, warning=FALSE}
+table_lasso <- cbind(row.names(betas)[which(as.matrix(betas)!=0)], betas[which(as.matrix(betas)!=0)])
+```
+Con lo cual la formula del modelo con regresión de Lasso, para que penalice terminos y el algoritmo pueda converger será:  
+
+`varObjBin ~ CCAA+Otros_Pct+AgricultureUnemploymentPtge+xAgricultureUnemploymentPtge+
+ActividadPpal+SUPERFICIE+PobChange_pct+Explotaciones+xPobChange_pct+xExplotaciones+
+Age_19_65_pct+Age_over65_pct+
+ForeignersPtge+UnemployLess25_Ptge+ConstructionUnemploymentPtge+SUPERFICIE+xOtros_Pct+
+xAge_19_65_pct+xAge_over65_pct+
+xForeignersPtge+xAgricultureUnemploymentPtge+xConstructionUnemploymentPtge+xSUPERFICIE` 
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+modelo_lasso<-glm(varObjBin ~ CCAA+Otros_Pct+AgricultureUnemploymentPtge+xAgricultureUnemploymentPtge+
+ActividadPpal+SUPERFICIE+PobChange_pct+Explotaciones+xPobChange_pct+xExplotaciones+Age_19_65_pct+Age_over65_pct+
+ForeignersPtge+UnemployLess25_Ptge+ConstructionUnemploymentPtge+SUPERFICIE+xOtros_Pct+xAge_19_65_pct+xAge_over65_pct+
+xForeignersPtge+xAgricultureUnemploymentPtge+xConstructionUnemploymentPtge+xSUPERFICIE, data=data_train_bin, family=binomial)
+```
+
+
+```{r, results='hide', echo=FALSE}
+modeloStepAIC_trans<-step(null_bin, scope=list(lower=null_bin, upper=modelo_lasso), direction="both", trace=0)
+modeloStepBIC_trans<-step(null_bin, scope=list(lower=null_bin, upper=modelo_lasso), direction="both", 
+                          k=log(nrow(data_train_bin)), trace=0)
+```
+Realizo la validación cruzada con los modelos de AIC/BIC calculados al principio y los dos modelos con las transformaciones calculados con la regresión de Lasso. 
+```{r, echo=FALSE}
+auxVarObj<-df_binario$varObjBin
+df_binario$varObjBin<-make.names(df_binario$varObjBin) 
+total<-c()
+modelos<-sapply(list(modeloStepAIC_bin,modeloStepBIC_bin,modeloStepAIC_trans,modeloStepBIC_trans),formula)
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = df_binario,
+             method = "glm", family="binomial",metric = "ROC",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      summaryFunction=twoClassSummary,
+                                      classProbs=TRUE,returnResamp="all")
+  )
+  total<-rbind(total,data.frame(roc=vcr$resample[,1],modelo=rep(paste("Modelo",i),
+                                                                nrow(vcr$resample))))
+}
+```
+
+
+```{r, fig.width=4, fig.height=3, echo=FALSE}
+boxplot(roc~modelo,data=total,main="Área bajo la curva ROC") #el 1 es el mejor
+```
+El mejor modelo es el número 1, por tanto en la regresión logística las transformaciones no han aportado un valor excesivamente significativo.
+
+### Selección de variables aleatoria
+Para la selección de variables aleatoria es necesario separar el conjunto de datos en submuestras y realizar una selección clásica de variables. Los modelos que más se repitan serán los ganadores.
+```{r, echo=FALSE, eval=FALSE}
+df_binario$varObjBin<-auxVarObj
+formIntT_bin<-'varObjBin ~ CCAA+Otros_Pct+AgricultureUnemploymentPtge+xAgricultureUnemploymentPtge+
+ActividadPpal+SUPERFICIE+PobChange_pct+Explotaciones+xPobChange_pct+xExplotaciones+Age_19_65_pct+Age_over65_pct+
+ForeignersPtge+UnemployLess25_Ptge+ConstructionUnemploymentPtge+SUPERFICIE+xOtros_Pct+xAge_19_65_pct+xAge_over65_pct+
+xForeignersPtge+xAgricultureUnemploymentPtge+xConstructionUnemploymentPtge+xSUPERFICIE'
+rep<-100
+prop<-0.7 # se realiza con el 70% de los datos de entrenamiento por velocidad. El resultado es el mismo.
+modelosGenerados_bin<-c()
+for (i in 1:rep){
+  set.seed(12345+i)
+  subsample<-data_train_bin[sample(1:nrow(data_train_bin),prop*nrow(data_train_bin),replace = T),]
+  full<-glm(formIntT_bin,data=subsample, family='binomial')
+  null<-glm(varObjBin~1,data=subsample, family='binomial')
+  modeloAux<-step(null,scope=list(lower=null,upper=full),direction="both",trace=0,k=log(nrow(subsample)))
+  modelosGenerados_bin<-c(modelosGenerados_bin,paste(sort(unlist(strsplit(as.character(formula(modeloAux))[3]," [+] "))),collapse = "+"))
+}
+
+```
+
+Los 3 modelos que más se repiten contienen las variables:
+```{r, eval=FALSE}
+freq(modelosGenerados_bin,sort="dec")[1:3,]
+```
+
+### Selección del modelo ganador
+```{r}
+modelos_ganadores_bin<-c("varObjBin ~ActividadPpal+Age_19_65_pct+CCAA+Explotaciones+
+                         ForeignersPtge+Otros_Pct",
+            "varObjBin ~Age_19_65_pct+CCAA+Explotaciones+ForeignersPtge+Otros_Pct+
+            PobChange_pct",
+            "varObjBin ~Age_19_65_pct+CCAA+ForeignersPtge+Otros_Pct+PobChange_pct",
+            formula(modeloStepAIC_bin))
+```
+
+```{r, results='hide', warning=FALSE, message=FALSE, fig.align='center', echo=FALSE}
+total_modelos_bin<-c()
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = df_binario,
+             method = "glm", family="binomial",metric = "ROC",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      summaryFunction=twoClassSummary,
+                                      classProbs=TRUE,returnResamp="all")
+  )
+  total_modelos_bin<-rbind(total_modelos_bin,data.frame(roc=vcr$resample[,1],
+                                                        modelo=rep(paste("Modelo",i),
+                                                                nrow(vcr$resample))))
+}
+```
+```{r echo=FALSE, fig.height=4, fig.width=7}
+boxplot(roc~modelo,data=total_modelos_bin,main="R-Square")
+```
+El mejor modelo es el modelo1 porque tiene una ROC mayor que el resto y la diferencia de parámetros con respecto al resto de modelos no es considerable. 
+El modelo ganador es:
+```{r}
+ModeloGanador_bin <- glm(varObjBin ~ActividadPpal+Age_19_65_pct+CCAA+Explotaciones+
+                           ForeignersPtge+
+                           Otros_Pct,data=data_train_bin,family='binomial')
+```
+
+
+### Determinar el punto de corte óptimo  
+```{r, warning=FALSE, message=FALSE}
+posiblesCortes<-seq(0,1,0.01)
+rejilla<-data.frame(t(rbind(posiblesCortes,sapply(posiblesCortes,function(x) sensEspCorte(ModeloGanador_bin,data_test_bin,"varObjBin",x,"1")))))
+rejilla$Youden<-rejilla$Sensitivity+rejilla$Specificity-1
+rejilla$posiblesCortes[which.max(rejilla$Youden)]
+rejilla$posiblesCortes[which.max(rejilla$Accuracy)]
+```
+
+```{r}
+sensEspCorte(ModeloGanador_bin,data_test_bin,"varObjBin",0.57,"1")  # la especificidad es mejor
+sensEspCorte(ModeloGanador_bin,data_test_bin,"varObjBin",0.44,"1") # la accuracy y la sensibilidad son mejores
+```
+Eligiremos el segundo punto de corte porque queremos maximizar los verdaderos positivos, por tanto elegimos el que mayor sensibilidad tiene. 
+
+### Interpretación de los coeficientes de dos variables incluidas en el modelo, una binaria y otra continua
+```{r}
+summary(ModeloGanador_bin)
+```
+Variable categórica CCAA. La categoría que el modelo coge como referencia es Andalucía.
+````{r }
+exp(6.0929818913) # Galicia
+exp(-0.1706573617)  # Cataluña
+``` 
+Es 442 veces más probable que el porcentaje de votos a la derecha supere el 30% en Galicia que en Andalucía. Esto tiene cierto sentido ya que Andalucía ha sido un feudo de partidos de izquierda durante muchos años y Galicia de la derecha. 
+
+Por el contrario,la probabilidad de que el porcentaje de votos a la derecha sea mayor del 30% es menor en Cataluña que en Andalucía. Es decir, es menos probable que haya mas de un 30% de votos a la derecha en Cataluña que en Andalucía, es decir se vota más a la derecha en Andalucía que en Cataluña.
+
+Variable cuantitativa ForeignersPtge.
+```{r}
+exp(0.0366478092)
+```
+
+Por cada unidad que aumenta la variable cuantitativa ForeignersPtge, la odd de que los votos de la derecha sean mayores que el 30% aumenta en 1.037 unidades. 
+
+### Justificar porqué es el mejor modelo y medir la calidad del mismo
+
+Evaluamos la estabilidad del modelo a partir de las diferencias en train y test:
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+#Evaluamos la estabilidad del modelo a partir de las diferencias en train y test:
+pseudoR2(ModeloGanador_bin,data_train_bin,"varObjBin")
+pseudoR2(ModeloGanador_bin,data_test_bin,"varObjBin")
+#es poca la diferencia, por lo que el modelo se puede considerar robusto
+roc(data_train_bin$varObjBin, predict(ModeloGanador_bin,data_train_bin,type = "response"))
+roc(data_test_bin$varObjBin, predict(ModeloGanador_bin,data_test_bin,type = "response"))
+# tambi?n es poca la diferencia en el ?rea bajo la curva roc y para el punto de corte
+sensEspCorte(ModeloGanador_bin,data_train_bin,"varObjBin",0.44,"1") # 1 indica el evento
+sensEspCorte(ModeloGanador_bin,data_test_bin,"varObjBin",0.44,"1") 
+```
+El pseudoR2 que hemos calculado es muy parecido tanto en train como en test lo cual implica que el modelo generalizará de manera más o menos correcta. El area bajo la curva es considerablemente alta y la sensibilidad (probabilidad de detectar verdaderos positivos) es muy elevada.
+
+

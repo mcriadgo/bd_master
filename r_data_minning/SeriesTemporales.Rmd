@@ -1,0 +1,295 @@
+---
+title: "SeriesTemporales"
+author: Marta Criado González
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggfortify)
+library(readr)
+library(readxl)
+library(forecast)
+library( dplyr )
+library (fUnitRoots)
+library(lmtest)
+library(tseries)
+library(Hmisc)
+library(reshape2)
+```
+
+## **1. Presentación de la serie a analizar. Descripción de la misma y objetivo que se persigue con su estudio**  
+La serie temporal a analizar representa la emisión de CO2 a la hora de generar electricidad. Las cantidades de CO2 están expresadas en millones de toneladas.  
+Esta serie contiene datos mensuales desde Enero de 1973 a Julio de 2016 y la cantidad de CO2 está medida en millones de toneladas.  
+El objetivo de este proyecto es analizar si la irrupción de las energías renovables en la producción de electricidad han hecho decrecer las emisiones de CO2. Para ello se analizará el total de las emisiones de CO2 entre 1973 y 2016 y se realizará una estimación de la serie temporal para los siguientes años.
+```{r, warning=FALSE, message=FALSE}
+carbon_emi <- read_csv("carbon_emi.csv", 
+    col_types = cols(YYYYMM = col_date(format = "%Y%m")))
+```
+
+El conjunto de datos tiene un valor para el mes 13 para cada año que indica la suma total del año en cuestión. Al formatear la columna de fechas ese valor pasa a Nan. Como este valor no es necesario en nuestro análisis lo eliminamos.
+```{r, echo=FALSE}
+head(carbon_emi, 13)
+```
+```{r}
+carbon_emi <- carbon_emi[!is.na(carbon_emi$YYYYMM),]
+```
+
+El valor de CO2 emitido está separado por tipo de combustible en la columna 'Description'.  
+```{r}
+unique(carbon_emi$Description)
+```
+
+Como se puede apreciar hay 8 tipos distintos de combustible y el último valor pertenece al total de energia.
+Ya que el objetivo del proyecto es determinar si un determinado tipo de combustible es más contaminante, antes de analizar el total de emisiones por todos los combustibles, se analizará cada tipo por separado.
+```{r, fig.height=3, fig.height=4, fig.align='center'}
+pivot <- dcast(carbon_emi, YYYYMM ~ Description, value.var="Value")
+names(pivot) <- gsub("Electric Power Sector CO2 Emissions", "", names(pivot))
+non_renewal_c02 <-ts(pivot[,c(2,5,8,9)], start=c(1973,1), end=c(2016,7), frequency=12)
+renewal_c02<-ts(pivot[,c(3,4,6,7)], start=c(1973,1), end=c(2016,7), frequency=12)
+autoplot(renewal_c02, facets=TRUE)
+autoplot(non_renewal_c02, facets=TRUE)
+```
+La fuente que más CO2 produce es el carbón. Las emisiones de este fuente tienen una tendencia positiva hasta el año 2010 que sufre un declive y en los años posteriores sigue decreciendo. La segunda fuente que más contamina es el gas natural, que se mantiene estable hasta 1997 cuando empieza a crecer. Se nota una tendencia contrapuesta entre el carbón y el gas natural. 
+Por el contrario, las energías renovables (se muestran en Non-Biomass, tercer gráfico de la primera imagen) no existen hasta el año 1990 pero a partir de su creación sufren una subida continua hasta el año 2004 que se mantiene estable en su máximo.
+
+Todas estas subidas pueden deberse a dos factores:   
+* Hay más consumo y por tanto hace falta generar más  
+* La fuente es más contaminante pero no implica que haya subido el consumo  
+
+En cualquiera de los dos casos, nuestro objetivo es minimizar las emisiones, tanto eliminando fuentes más contaminantes como haciendo las fuentes más ecológicas.  
+
+**Para el caso de estudio de esta entrega voy a elegir el total de la energía porque engloba a todos los tipos de combustible**
+
+## **2. Representación gráfica y descomposición de la misma** 
+La gráfica de la serie temporal muestra una tendencia positiva hasta el año 2007 aproximadamente, a partir de este año sufre una caída bastante brusca. La variabilidad de la serie tampoco es constante ya que a partir del año 1995 la variabilidad aumenta.   
+```{r,fig.width=6, fig.height=4,fig.align='center',message=FALSE, warning=FALSE}
+total_em_ts <- ts(pivot[,10], start=c(1973,1), end=c(2016,7), frequency=12)
+total_em_ts_Comp<- decompose(total_em_ts,type=c("multiplicative"))
+autoplot(total_em_ts, series='Datos') + 
+  autolayer(trendcycle(total_em_ts_Comp), series='Tendencia')+ 
+  xlab('Año') + ylab('Consumo Total CO2')+
+  ggtitle('Consumo de CO2 mensual') + 
+  scale_colour_manual(values=c('gray','red'), breaks = c('Datos', 'Tendencia'))
+```
+La tendencia y la variabilidad crecen a medida que aumenta el eje temporal, así que esta serie sigue un esquema multiplicativo. 
+
+```{r, fig.width=6, fig.height=4, fig.align='center'}
+autoplot(total_em_ts_Comp)
+```
+
+## **3. Reserva del último periodo**  
+Creo una nueva serie temporal en la que no están presentes los datos del último año observado, de Julio de 2016 a Julio de 2017. 
+```{r}
+total_em_TR<-window(total_em_ts,start=c(1973,1), end=c(2015,7), frequency=12)
+```
+
+
+## **4. Encontrar el modelo de suavizado exponencial más adecuado. Representar gráficamente la serie observada y la serie suavizada con las predicciones para un periodo que se considere adecuado. Escribir la expresión del modelo obtenido**  
+Ya que la serie tiene tendencia y estacionalidad, el método de suavizado más adecuado es Holt-Winters con un modelo multiplicativo. 
+```{r}
+fitHW <- hw(total_em_TR,seasonal="multiplicative", h=12)
+```
+En la siguiente gráfica se muestra la serie original en color negro, la serie ajustada en color rojo y la predicción para el siguiente año en azul.
+```{r, fig.width=6, fig.height=4,echo =FALSE, fig.align='center'}
+autoplot(fitHW) +
+  autolayer(fitted(fitHW), series="Fitted") +
+  ylab("Emisiones Totales") + xlab("Fecha")
+
+fitHW$model 
+```
+La expresión del nivel en el tiempo: $L_{t} = 0.4277*\frac{X_{t}}{S_{t-12}}+(1-0.4277)(L_{t-1} + b_{t-1})$  
+
+La expresión de la tendencia en el tiempo: $b_{t} = 0.0001*(L_{t}-L_{t-1})+(1-0.0001)b_{t-1}$  
+
+La expresión de la estacionalidad en el tiempo: $S_{t}=0.196*\frac{X_{t}}{L_{t}}+(1-0.196)S_{t-12}$  
+
+Para predecir un valor futuro un instante de tiempo posterior al presente: $\hat{{x}_{t+1}} = (L_{t}+b_{t})S_{t+1-12}$  
+
+Para predecir un valor en el instante m del tiempo: $\hat{{x}_{n+m}} = (L_{n}+b_{n}m)S_{n+m-12}$
+
+## **5. Representar la serie y las funciones ACF y PACF. Decidir que modelo puede ser ajustado. Ajustar el modelo adecuado comprobando su idoneidad.**
+En primer lugar, dado que no hay estabilidad en la varianza como hemos comprobado en el apartado 2, es necesario realizar la transformación de Box-Cox. En las gráficas se puede apreciar como la varianza se estabiliza después de aplicar una transformación logarítmica.
+```{r}
+total_em_DIFF <- log(total_em_ts)
+```
+```{r, echo=FALSE, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+autoplot(total_em_ts)
+autoplot(total_em_DIFF)
+```
+
+Represento las gráficas de la autocorrelación y la autocorrelación parcial de la serie temporal estabilizada en varianza.
+```{r, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+ggAcf(total_em_DIFF, lag=48)
+ggPacf(total_em_DIFF, lag=48)
+```
+
+En la gráfica ACF se puede observar que la autocorrelación es muy similar en los primeros instantes de tiempo y tiene un decrecimiento lento en los primeros retardos. Por todo esto y dado que la serie no es estacionariia en media, es necesario realizar una diferenciación.
+
+```{r, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+ggAcf(diff(total_em_DIFF),48)
+ggPacf(diff(total_em_DIFF),48)  #se aprecia demasiada correlacion en los periodos
+```
+
+Con una diferenciación se aprecia que la gráfica ACF sufre un cambio ya que ahora si hay cambios bruscos en la gráfica. Aún así, los valores de la autocorrelación para los periodos de la serie (12, 24, 36 y 48) son muy elevados. Por ello, se realiza una segunda diferenciación con valor 12 ya que esta vez la diferenciación será sobre la estacionalidad. 
+```{r, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+ggAcf(diff(diff(total_em_DIFF),12),48)
+ggPacf(diff(diff(total_em_DIFF),12),48)
+```
+
+En esta última ACF ya se aprecia que solo existe una significación elevada en el valor 12 (primer periodo) de la serie. Por tanto, una vez obtenidas las gráficas finales ACF y PACF se puede proceder a la obtención del modelo ARIMA final.
+
+### **Modelo ARIMA Manual** 
+* Parte regular (p,d,q)  
+
+Se aprecian dos valores con una significación muy elevada en el retardo 1 y 2 en las dos gráficas. Después de estos dos valores, el resto son nulos o muy cercanos a nulo. 
+Dado que se observa un comportamiento muy similar en ACF y PACF, podría tratarse de un AR(2) o un MA(2).
+Como se ha realizado una diferenciación en la parte regular, el parámetro d=1.
+
+* Parte estacional (P,D,Q) 
+
+En ACF el retardo 12 tiene un nivel de significación muy elevado, mientras que el 24, 36 y 48 son nulos. En PACF estos retardos sufre un decrecimiento gradual, por tanto la parte estacional tendrá Q=1. Ya que hemos realizado una diferenciación estacional el parámetro D será igual a 1.
+
+Como conclusión, los dos modelos resultantes pueden ser:  
+1. ARIMA(0,1,2)(0,1,1)(12)  
+2. ARIMA(2,1,0)(0,1,1)(12)
+
+**Primer modelo**   
+
+El AIC es 3216, todos los parámetros son significativos puesto que su p-valor es menor que 0.05 por tanto se rechaza la hipótesis nula de que el parámetro es 0.
+```{r}
+fitARIMA1 <- arima(total_em_TR, order=c(0,1,2), seasonal=c(0,1,1))
+print(fitARIMA1)
+coeftest(fitARIMA1) # todos los parametros son significativos
+```
+Ahora es necesario analizar los residuos. Los residuos deberían tender a comportarse como ruido blanco, es decir, media cero y varianza constante y ausencia de correlación en PACF y ACF.
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+checkresiduals(fitARIMA1)
+```
+Una vez se tienen las gráficas se aprecia que los residuos no son ruido blanco ya que se ven varios picos en la gráfica y en las funciones ACF y PACF. Esto nos indica que será necesario reajustar el modelo añadiendo una parte autorregresiva o aumentando la parte de media móvil.
+
+**Segundo modelo**   
+El AIC es un poco peor que el anterior modelo, todos los parámetros son significativos puesto que su p-valor es menor que 0.05 por tanto se rechaza la hipótesis nula de que el parámetro es 0.
+```{r}
+fitARIMA2 <- arima(total_em_TR, order=c(2,1,0), seasonal=c(0,1,1))
+print(fitARIMA2)
+coeftest(fitARIMA2) 
+```
+
+En las gráficas de los residuos se aprecia lo mismo que en el anterior modelo, incluso en ACF y PACF hay más picos
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+checkresiduals(fitARIMA2)
+```
+En los siguientes modelos probaré ARIMA(1,1,2)(0,1,1)(12) y ARIMA(2,1,1)(0,1,1)(12) para ver si añadiendo parte autorregresiva al primer modelo o parte móvil al segundo modelo los resultados mejoran.
+
+**Tercer modelo**  
+El AIC es el mejor de entre los tres modelos testados hasta ahora (3211.27) pero el segundo parámetro de media móvil no es significativo, lo cual puede indicar que se obtendría mejor resultado con un MA(1)
+```{r}
+fitARIMA3 <- arima(total_em_TR, order=c(1,1,2), seasonal=c(0,1,1))
+print(fitARIMA3)
+coeftest(fitARIMA3) 
+```
+
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+checkresiduals(fitARIMA3)
+```
+
+Se siguen observando picos en las autocorrelaciones por tanto todavía no estamos ante un modelo con ruido blanco en sus residuos, pero la autocorrelación empieza a disminuir lo cual es muy síntoma.
+
+**Cuarto modelo**  
+El AIC es prácticamente idéntico al modelo ARIMA(1,1,2)(0,1,1) y el segundo parámetro autorregresivo no es significativo, lo cual puede indicar que se obtendría mejor resultado con un AR(1)
+```{r}
+fitARIMA4 <- arima(total_em_TR, order=c(2,1,1), seasonal=c(0,1,1))
+print(fitARIMA4)
+coeftest(fitARIMA4) 
+```
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+checkresiduals(fitARIMA4)
+```
+
+Las gráficas también son practicamente idénticas al ARIMA del modelo 3.
+El último modelo que se va a probar es el ARIMA(1,1,1)(0,1,1)(12) ya que los segundos parámetros autorregresivo y móvil eran poco significativos.
+
+**Quinto modelo**    
+El AIC es un poco mejor que el de los anteriores modelos testados y todos los parámetros son significativos. 
+Además es el que más cerca está de pasar el test de Ljung-Box con un p-valor de 0.2
+```{r}
+fitARIMA5 <- arima(total_em_TR, order=c(1,1,1), seasonal=c(0,1,1))
+print(fitARIMA5)
+coeftest(fitARIMA5) 
+```
+
+```{r,fig.width=6, fig.height = 3, fig.align='center'}
+checkresiduals(fitARIMA5)
+```
+
+El modelo elegido es el ARIMA(1,1,1)(0,1,1)(12) porque aunque los residuos no estén incorrelados ya que se aprecia que la gráfica de ACF tiene valores significativos, si que parecen seguir una distribución normal y es el modelo con mejor p-valor y con todos sus parámetros significativos y mejor AIC (el más bajo). Es el que menor número de parámetros tiene así que por el principio de parsimonia, elijo este modelo.
+
+**Comparación con el modelo AUTOARIMA**
+```{r}
+fit_autoARIMA <- auto.arima(total_em_TR, seasonal = TRUE)
+checkresiduals(fit_autoARIMA)
+```
+
+Como se puede apreciar el modelo AUTO ARIMA elige un ARIMA(2,1,1)(0,1,1)(12) en el que el p-valor del test de Ljung-Box es mucho peor que en nuestro último modelo manual. También el número de parámetros es menor, así que definitivamente podemos concluir que el mejor modelo es el ARIMA(1,1,1)(0,1,1)(12) y también podríamos deducir que el algoritmo ARIMA no va a ser el adecuado para ajustar esta serie temporal puesto que incluso su versión automática (AUTO-ARIMA) devuelve unos resultados que no son óptimos en los que los residuos no son ruido blanco y están autocorrelados.
+
+## **6. Escribir la expresión algebraica del modelo ajustado con los parámetros estimados**  
+
+$$(1-0.4992B)(1-B^{12})(1-B)X_{t} = (1+0.8962B^{12})(1+0.7889B)Z_{t}$$
+$$(1-0.4992B)(1-B^{12})(X_{t}-X_{t-1})=(Z_{t}+0.9Z_{t-1}+0.79Z_{t-12}+0.8Z_{t-13})$$
+$$X_{t}=1.5X_{t-1}-0.5X_{t-2}+X_{t-12}-1.5X_{t-13}+0.5X_{t-14} + Z_{t}+0.9Z_{t-1}+0.79Z_{t-12}+0.8Z_{t-13}$$
+
+## **7.Calcular las predicciones y los intervalos de confianza para las unidades de tiempo que se considere oportuno. Representarlas gráficamente**    
+Se calculan las predicciones para el periodo de tiempo al que corresponde la frecuencia de los datos, como los datos son mensuales se calculará para frecuencia=12. 
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+forecast(fitARIMA5,12)
+autoplot(forecast(fitARIMA5,12),48)
+```
+Como se puede apreciar las predicciones tienen una forma muy similar al último periodo de datos de la gráfica. Los intervalos de confianza están situados al 80% y al 95% y son bastante pequeños por lo que los datos no van a variar demasiado en sus estimaciones. 
+
+## **8.Comparar las predicciones obtenidas con cada uno de los métodos para los valores que se reservaron en el apartado 3, tanto gráfica como numéricamente. Conclusiones**  
+La accuracy del modelo con suavizado exponencial por el método de Holt-Winters tiene un RMSE más elevado que el ARIMA.
+```{r}
+accuracy(fitARIMA5) 
+accuracy(fitHW)
+```
+
+Creo un subconjunto de los datos para que los resultados se aprecien mejor e incluyen los datos que se toman como test (el último año de la serie)
+```{r}
+data <- window(total_em_ts,start=c(2010,1), frequency=12)
+```
+
+```{r,fig.show="hold", message=FALSE, warning=FALSE, fig.height=3, fig.width=6}
+par(mfrow=c(2,1))
+autoplot(fitHW,48) +
+  autolayer(data, series="Data", size=1) +
+  autolayer(fitHW$mean, series="Forecasts", size=0.7)
+autoplot(forecast(fitARIMA5,12),48) +
+  autolayer(data, series="Data", size=1) +
+  autolayer(forecast(fitARIMA5,12)$mean, series="Forecasts", size=0.7)
+```
+
+Como se puede apreciar ambas predicciones son muy similares, aunque parece que el ARIMA se ajusta mejor a los datos y saca mejores predicciones. Como pudimos ver en el apartado 4 el AIC de Holt-Winters sobrepasa los 5000 mientras que el ARIMA está en torno a las 3000. 
+```{r}
+pivot[c((nrow(pivot)-10):nrow(pivot)),10]
+fitHW$mean
+forecast(fitARIMA5,12)$mean
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

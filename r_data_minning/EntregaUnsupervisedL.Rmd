@@ -1,0 +1,387 @@
+---
+title: "Entrega Unsupervised Learning"
+author: Marta Criado González
+output:
+  html_document:
+    theme: paper
+    highlight: tango
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(readxl)
+library(corrplot)
+library(kableExtra)
+library(magrittr)
+library(dplyr)
+library(knitr)
+library(tidyverse)
+library(factoextra)
+library(FactoMineR)
+library(ggplot2)
+library(heatmaply)
+library (cluster)
+provincias <- read_excel('Provincias.xlsx')
+```
+
+### __1. Calcular la matriz de correlaciones, y su representación gráfica ¿Cuáles son las variables más correlacionadas de forma inversa?__    
+```{r}
+datos <- as.data.frame(provincias)
+rownames(datos) <- datos[,1]
+dat_P <- datos[,-1]
+corr_matrix <- round(cor(dat_P, method='pearson'),3)
+```
+```{r ,echo=FALSE, message=FALSE, warning=FALSE }
+foo <- function(x, n, nmax){
+  cell_spec(x, background = ifelse(is.na(as.numeric(x)), "white",
+                                   ifelse(x < -0.5, "#EC7063", "white")))
+}
+df_corr <- data.frame(corr_matrix)
+df_corr%>%
+  rownames_to_column('columns_datP') %>%
+  mutate_all(funs(foo(., n = row_number(), nmax = n()))) %>%
+  column_to_rownames('columns_datP') %>%
+  kable(escape=F, booktabs=T) %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  column_spec(1, bold=TRUE)  %>%
+  scroll_box(width = "100%", height = "100%")
+```
+
+
+```{r}
+corrplot(cor(dat_P,method='pearson'), method='ellipse', type='upper', order='hclust')
+```
+
+Las variables más correlacionadas de forma inversa son Natalidad y TasaActividad con la Mortalidad. Esto tiene sentido puesto que cuanto más aumente la mortalidad, menor tasa de actividad y natalidad habrá.
+
+También TasaParo está tienen un correlación negativa bastante fuerte con la Mortalidad y el IPC.Si la tasa de paro aumenta, el IPC y la mortalidad descienden.
+
+### __2. Realizar un análisis de componentes principales sobre la matriz de correlaciones, calculando 7 componentes. Estudiar los valores de los autovalores obtenidos y las gráficas que los resumen. ¿Cuál es el número adecuado de componentes?__
+```{r}
+pca <- PCA(dat_P, scale.unit = TRUE,ncp=7,graph=FALSE)
+eig_val <- get_eigenvalue(pca)
+```
+```{r, echo=FALSE}
+data.frame(eig_val)%>%
+  mutate_all(~cell_spec(., background=ifelse(row_number()<5, "#85C1E9","white"))) %>%
+  kable(escape=F, booktabs=T) %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  column_spec(1, bold=TRUE)  %>%
+  scroll_box(width = "100%", height = "300px")
+```
+Con una sola componente ya tendríamos más del 60% de la variabilidad total explicada, y con cuatro componente este total ascendería al 92%. Por tanto, el número de componentes adecuado estaría sería 4, ya que con la cuarta componente explicaríamos una variable más.
+```{r, message=FALSE, warning=FALSE}
+fviz_eig(pca, addlabels=TRUE)
+```
+
+### __3. Nuevo analisis de matriz de correlaciones pero solo con las componentes principales.__
+Elijo 4 componentes principales
+```{r}
+pca <- PCA(dat_P, scale.unit = TRUE,ncp=4,graph=FALSE)
+```
+
+__a. Coeficientes para obtener las componentes principales. ¿Cuál es la expresión para calcular la primera componente en función de las variables originales?__
+```{r, echo=FALSE}
+data.frame(round(pca$svd$V,3))%>%
+  #mutate_all(funs(foo(., n = row_number(), nmax = n()))) %>%
+  kable(escape=F, booktabs=T, caption='Eigenvalues de las 4 componentes principales') %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  scroll_box(height = "300px")
+```
+
+La expresión para calcular CP1 en función del resto de las variables originales es:
+${CP_1} = 0.294{POBLACION^*}-0.106{NATALIDAD^*} + 0.041{MORTALIDAD^*} + 0.110{IPC^*} +...+0.172{VS^*}$
+
+__b. Tabla de correlaciones de las variables de las CP. Para cada componente se indica las variables más correlacionadas__  
+```{r}
+variables <- get_pca_var(pca)
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+foo <- function(x, n, nmax){
+  cell_spec(x, background = ifelse(is.na(as.numeric(x)), "white",
+                                   ifelse(x > 0.7, "#F7DC6F", ifelse(x< -0.7, "#EC7063", "white"))))
+}
+
+data.frame(round(variables$cor,3))%>%
+  rownames_to_column('columns_datP') %>%
+  mutate_all(funs(foo(., n = row_number(), nmax = n()))) %>%
+  column_to_rownames('columns_datP') %>%
+  kable(escape=F, booktabs=T) %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  column_spec(1, bold=TRUE)  %>%
+  scroll_box(width = "100%", height = "300px")
+```
+
++ <u>CP1</u>: Gran parte de las variables tienen una representación muy alta en la primera componente (CP1) ya que como hemos visto anteriormente la primera componente explicaba más del 60% del conjunto de datos. Las variables menos representadas en CP1 son Mortalidad, Natalidad, IPC, TasaActividad, TasaParo, CANE y VS. Todas las demás tienen un representatividad mayor del 90%, excepto VS que tiene una representatividad cercana al 60%  
+
++ <u>CP2</u>: las variables más representadas son Mortalidad, Natalidad, TasaParo y el IPC (en menor medida)
+
++ <u>CP31</u>: las variables más representada es CANE, lo cual indica que añadir una tercera componente añade esta variable.
+
++ <u>CP4</u>: las variables más representadas son VS, TasaActividad e IPC
+
+__c. Gráficos que representan las variables en los planos formados por las componentes y explicación de lo que representa cada componente.__    
+En las siguientes dos gáficas se muestra la representación entre CP1 y CP2, y entre CP1 y CP3  
+```{r, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_var(pca, axes=c(1,2),col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) + labs(title ="PCA CP1-CP2")
+fviz_pca_var(pca, axes=c(1,3), col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE)+ labs(title ="PCA CP1-CP3")
+```
+
+En estas gráficas también se pueden apreciar las correlaciones entre variables ya que, por ejemplo, todas las variables que aparecen en naranja oscuro en la parte derecha de la gráfica están muy correlacionadas entre ellas porque el ángulo que forman es muy pequeño. 
+
+<u> _Gráfica CP1-CP2_ </u>  
+
+Se aprecia que la primera componente (CP1) recoge las variables AFS, NumEmpresas, Construccion, PIB, APT, Poblacion, TVF y CTH
+ya que aparecen sobre el eje de abscisas con valores muy altos. 
+La variable Mortalidad está representada muy negativamente en CP2 ya que se encuentra en el tercer cuadrante de la gráfica.
+
+<u> _Gráfica CP1-CP3_ </u>  
+
+La tercera componente (CP3) recoge el censo agrario (CANE). 
+
+En las siguientes dos gáficas se muestra la representación entre CP2 y CP3, y entre CP2 y CP4
+```{r, fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_var(pca, axes=c(2,3), col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) + labs(title ="PCA CP2-CP3") 
+fviz_pca_var(pca, axes=c(2,4), col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) + labs(title ="PCA CP2-CP4")
+```
+<u> _Gráfica CP2-CP3_ </u>    
+
+Se aprecia que la variable Mortalidad está más representada en CP2 que en CP3 aunque está representada negativamente en CP2 puesto que se encuentra en el primer cuadrante de la gráfica. 
+La variable CANE está mayormente representada en CP3.
+
+Mortalidad y Natalidad están correlacionadas negativamente puesto que el ángulo que forman es de 180 grados. Natalidad y CANE no están correlacionados y CANE y Mortalidad tampoco puesto que el ángulo que forman es de 90 grados.
+
+Las variables TasaParo y Natalidad están equitativamente representadas en ambas componentes pero Natalidad está representada negativamente en CP3 al encontrarse en el cuarto cuadrante de la gráfica.
+
+<u> _Gráfico CP2-CP4_ </u>    
+
+Todas las variables que veíamos muy representadas en CP1, están muy poco representadas en CP4 (las que aparecen en tonos azulados). La mayor diferencia que se observa con la gráfica anterior es que TasaParo y Natalidad si están correlacionadas en CP2 y CP4.
+
+
+En las siguientes dos gáficas se muestra la representación entre CP3 y CP4, y entre CP1 y CP4
+```{r,  fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_var(pca, axes=c(3,4),col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) + labs(title ="PCA CP3-CP4")
+fviz_pca_var(pca, axes=c(1,4), col.var='cos2', gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) + labs(title ="PCA CP1-CP4")
+```
+<u> _Gráfica CP3-CP4_ </u>  
+
+CANE es la variable más representada en CP3, por delante de TasaActividad que tiene representación equitativa entre CP3 y CP4, y el número de viviendas secundarias (VS).
+Entre el número de viviendas secundarias (VS) y TasaActividad hay una correlación casi nula puesto que el ángulo formado por ellas es casi 90 grados.  
+
+<u> _Gráfica CP1-CP4_ </u>  
+
+Podemos ver que la variable VS está representada de manera idéntica en CP1 como en CP4 y la mortalidad tiene una representación negativa en ambas dos CPs.
+
+__d.Mostrar la tabla y los gráficos que nos muestran la proporción de la varianza de cada variable que es explicado por cada componente. ¿Cuál de las variables es la que está peor explicada?__  
+```{r, warning=FALSE, message=FALSE, fig.show="hold", out.width="50%"}
+foo <- function(x, n, nmax){
+  cell_spec(x, background = ifelse(is.na(as.numeric(x)), "white",
+                                   ifelse(x< 0.2 & x>0, "#EC7063", "white")))
+}
+vars <- data.frame(round(variables$cos2,4))
+vars$sums <- rowSums(vars)
+vars%>%
+  rownames_to_column('columns_datP') %>%
+  mutate_all(funs(foo(., n = row_number(), nmax = n()))) %>%
+  column_to_rownames('columns_datP') %>%
+  kable(escape=F, booktabs=T) %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  column_spec(1, bold=TRUE)  %>%
+  scroll_box(width = "100%", height = "300px")
+
+corrplot(variables$cos2, is.corr=FALSE)
+```
+
++ CP1: la variable menos explicada es TasaParo con un 0.0022 y CANE tambien   
++ CP2: las variables que no explican nada son Poblacion y el total de viviendas familiares (TVF)
++ CP3: Ocupados es la variable que no tiene representación
++ CP4: Industria, Contruccion y CTH
+
+Por variables, la variable peor explicada es IPC con una representación cercana al 77%. Esto se puede observar en la columna `sums` de la tabla mostrada y en la siguiente gráfica.
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+fviz_cos2(pca, choice='var', axes=1:4)
+```
+
+__e. Mostrar la tabla y los gráficos que nos muestran el porcentaje de la varianza de cada Componente que es debido a cada variable. ¿Que variables contribuyen más a cada Componente?__  
+
+En las siguientes gráficas se muestran tanto de forma numérica (en tabla) como de forma gráfica la contribución de cada variable en cada componente.
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%"}
+par(mfrow=c(2,2))
+data.frame(round(variables$contrib,2))%>%
+  kable(escape=F, booktabs=T, caption='Contribuciones') %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  scroll_box(height = "300px")
+fviz_contrib(pca,choice='var', axes=1) #contribucion de las variables a CP1
+fviz_contrib(pca,choice='var', axes=2) #contribucion de las variables a CP2
+fviz_contrib(pca,choice='var', axes=3) #contribucion de las variables a CP3
+fviz_contrib(pca,choice='var', axes=4) #contribucion de las variables a CP4
+```
+
++ CP1: las variables que más contribuyen son Ocupados, NumEmpresas, Poblacion, Construccion,CTH,AFS,TVF,PIB y APT  
++ CP2: las variables que más contribuyen son Mortalidad, Natalidad y  TasaParo  
++ CP3: la variable que más contribuye es el censo agrario (CANE)  
++ CP4: la variable que más contribuye es el número de viviendas secundarias (VS)  
+
+__f. Sobre los gráficos que representan las observaciones en los nuevos ejes y el gráfico Biplot., teniendo en cuenta la posición de las provincias en el gráfico. Comentar las provincias que tienen una posición más destacada en cada componente, en positivo o negativo, ¿Qué significa esto en términos socioeconómicos para estas provincias?__  
+
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_ind(pca, col.ind='cos2', axes=c(1,2), gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE)
+fviz_pca_biplot(pca,  axes=c(1,2),repel=TRUE, col.var="#2E9FDF", col.ind="#696969")
+```
+Lo que podemos apreciar en estas gráficas es que Madrid y Barcelona tienen un comportamiento similar. Tienen un valor muy alto en la CP1 y negativo en CP2, por tanto tendrán baja natalidad pero una población elevada y más actividad empresarial puesto que el PIB, Industria, NumEmpresas, Ocupados son muy elevados con respecto al resto.
+Por el contrario en provincias como Ceuta, Melilla o Almería la tasa de paro es muy elevada y la natalidad también.
+Provincias del norte de España como Zamora, Lugo, Ourense o Lugo tienen una mortalidad mucho más elevada ya que en estas provincias la población es más mayor y tienen una natalidad muy baja.
+
+
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_ind(pca, axes=c(2,3), gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE)
+fviz_pca_biplot(pca,  axes=c(2,3),repel=TRUE, col.var="#2E9FDF", col.ind="#696969")
+```
+En estas gráficas se aprecia mejor que la tasa de paro es más elevada en las provincias de Andalucía y parte de Castilla La Mancha. El IPC es mucho más elevado en Barcelona y las provincias vascas. La natalidad y la tasa de actividad es más elevada en Melilla y Ceuta, contrariamente a las provincias del norte de España.
+
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_pca_ind(pca, axes=c(3,4), gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE)
+fviz_pca_biplot(pca,  axes=c(3,4),repel=TRUE, col.var="#2E9FDF", col.ind="#696969")
+```
+
+En estas últimas gráficas se aprecia que Alicante y Valencia tienen una cantidad elevada de viviendas secundarias (VS) ya que son provincias de costa. En Jaén y en Valencia hay un censo agrario muy elevado (CANE)
+
+__g. Si tuviéramos que construir un índice que valore de forma conjunta el desarrollo económico de una provincia, como se podría construir utilizando una combinación lineal de todas las variables. ¿Cuál sería el valor de dicho índice en Madrid? ¿Cual sería su valor en Melilla?__
+
+```{r}
+ind <- get_pca_ind(pca)
+ind$coord[c('Madrid', 'Melilla'),]
+```
+En Madrid el índice sería $Madrid = 16.78CP1 -0.36CP2 -0.85CP3 -2.36CP4$    
+En Melilla sería  $Melilla = -2.22CP1 + 4.78CP2 - 1.90CP3 - 2.23CP4$
+
+### __4. Representar un mapa de calor de la matriz de datos, estandarizado y sin estandarizar para ver si se detectan inicialmente grupos de provincias.__ 
+```{r}
+heatmaply(dat_P,seriate='mean')
+```
+```{r}
+datos_Pst <- scale(dat_P)
+heatmaply(as.matrix(datos_Pst),seriate = 'mean',row_dend_left = TRUE,plot_method = 'plotly')
+```
+Con los datos sin estandarizar es imposible obtener más de 2 clusters porque no son visibles. Una vez se serializan los datos, podemos visualizar hasta 8 clusters perfectamente.
+
+## __5.Realizar un análisis Jerárquico de clusters para determinar si existen grupos de provincias con comportamiento similar.__
+
+```{r}
+d <- dist(dat_P, method='euclidean')
+fviz_dist(d, show_labels=TRUE)
+```
+
+Se puede ver que Barcelona y Madrid tienen una distancia muy superior con el resto de provincias, también Valencia tiene una distancia elevada con el resto de provincias.   
+
+Con la función `fviz_dend` agrupamos las variables más similares para poder realizar grupos. Para ello, es necesario estandarizar los datos. 
+```{r}
+d_st<-dist(datos_Pst,method='euclidean')
+res.hc_st <- hclust(d_st,method='ward.D2')
+fviz_dend(res.hc_st, cex=0.5)
+```
+
+__a. A la vista del dendrograma ¿Cuántos clusters recomendarías?__
+
+Decido hacer 4 clusters.
+```{r, warning=FALSE, message=FALSE}
+grp <- cutree(res.hc_st, k=4)
+fviz_dend(res.hc_st,k=4,cex=0.5,k_colors=c("#00AFBB", "#E7B800", "#FC4E07",'#48C9B0','#C39BD3','#5D6D7E',"#0E6655","#5B2C6F"), rect=T,color_labels_by_k = T)
+```
+
+
+__b. Representar los individuos agrupados según el número de clusters elegido__
+
+```{r, fig.align='center'}
+knitr::kable(table(grp))
+```
+
+
+__c.¿Qué número óptimo de clusters nos indican los criterios Silhouette y de Elbow? __
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%"}
+par(mfrow=c(1,2))
+fviz_nbclust(datos_Pst, kmeans,method='wss')+ labs(title= "Criterio Elbow")
+fviz_nbclust(datos_Pst, kmeans, method='silhouette') + labs(title= "Criterio Silhouette")
+```
+
+El criterio Elbow recomienda entre 5 y 6, porque a partir de 6 el error permanece estable. Lo que mide el criterio de Elbow es la inercia, es decir, la distancia de cada punto a su centroide más próximo. Como podemos apreciar en el gráfico esta medida va a ir descendiendo a medida que el número de clusters aumenta, por tanto no es una medida del todo fiable.
+
+El criterio Silhouette recomienda 2 clusters. 
+
+Mi decisión es elegir 3 clusters puesto que la inercia en el criterio de Elbow es mucho menor que con 2 clusters, y en el criterio Silhouette el valor para 3 clusters es mucho mejor que para 4.
+
+__d. Con el número de clusters decidido en el apartado anterior realizar un agrupamiento no jerárquico.__
+
+```{r, message=FALSE, warning=FALSE}
+RNGkind(sample.kind='Rounding')
+set.seed(1234)
+km.res <- kmeans(datos_Pst, 3)
+```
+
+<u>Representar los clusters formados en los planos de las Componentes principales. Relacionar la posición de cada cluster en el plano con lo que representa cada componente principal</u>
+
+```{r}
+fviz_cluster(km.res,datos_Pst)
+```
+
+
+<u>Evaluar la calidad de los clusters</u>
+```{r}
+sil<-silhouette(km.res$cluster, dist(datos_Pst))
+rownames(sil)<-rownames(dat_P)
+fviz_silhouette(sil)
+```
+
+En la gráfica se puede apreciar que no hay ninguna observación mal clasificada, por tanto 3 clusters puede ser un número adecuado.
+
+Compruebo los resultados con 5 clusters que es uno de los valores óptimos que indicaba el criterio de Elbow. 
+```{r, warning=FALSE, message=FALSE}
+RNGkind(sample.kind='Rounding')
+set.seed(1234)
+km.res5 <- kmeans(datos_Pst, 5)
+```
+```{r, warning=FALSE, message=FALSE,fig.show="hold", out.width="50%", results='hiden'}
+par(mfrow=c(1,2))
+fviz_cluster(km.res5,datos_Pst)
+sil5<-silhouette(km.res5$cluster, dist(datos_Pst))
+rownames(sil5)<-rownames(dat_P)
+fviz_silhouette(sil5)
+```
+Elevando el número de clusters se puede apreciar que hay bastantes observaciones mal clasificadas en los clusters 1 y 5. También el resultado de la función `fviz_silhouette` decrece a casi la mitad (de 0.40 a 0.23)
+
+__e.Explicar las provincias que forman cada uno de los clusters y comentar cuales son las características socioeconómicas que las hacen pertenecer a dicho cluster.__   
+```{r}
+sort(km.res$cluster)
+```
+
+```{r}
+stats_cluster <- aggregate(datos_Pst, by=list(km.res$cluster), mean)
+```
+```{r, echo=FALSE}
+data.frame(stats_cluster)%>%
+  kable(escape=F, booktabs=T) %>%
+    kable_styling(full_width=FALSE, bootstrap_options = c('hover', 'responsive')) %>%
+  scroll_box(width = "100%")
+
+```
+
+
+<u> __Cluster 2__ </u>  
+Es el que mayor población tiene. También tiene un PIB elevado, una tasa de viviendas secundarias considerablemente alta y una tasa de viviendas familiares muy elevada. En las provincias pertenecientes al cluster 2 existe una inflación en los precios puesto que el IPC es elevado. El cluster 2 pertenece a las provincias de Madrid y Barcelona, por tanto es lógico que sean los que más potencia económica tienen. 
+
+<u> __Cluster 3__ </u>  
+En las provincias del cluster 3 ocurre todo lo contrario, hay deflación. 
+Ceuta y Melilla (Cluster 3) son las provincias con mayor tasa de natalidad y menor mortalidad, también son las dos provincias con mayor tasa de paro. 
+
+Los aspectos por los que se forma el cluster 2 son factores económicos como la Ocupacion, los distintos sectores de trabajo, el PIB y el IPC. 
+Los aspectos por los que se forma el cluster 3 es la natalidad y la mortalidad en mayor medida. 
+
+<u> __Cluster 1__ </u>  
+Este cluster es el que más provincias engloba por tanto tiene valores mucho más estables (en torno al 0) que los otros dos clusters que están muy sesgados por ciertos criterios socioeconómicos.
+
