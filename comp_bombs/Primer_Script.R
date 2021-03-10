@@ -14,11 +14,12 @@ suppressPackageStartupMessages({
   library(inspectdf)      # EDAs automaticos
   library(ranger)         # Fast randomForest
   library(forcats)        # Tratar variables categoricas
+  library(mcen)
 })
 
-dattrainOr    <- fread(file = "training_set.csv", data.table = FALSE )
-dattrainLabOr <- fread(file = "training_set_labels.csv", data.table = FALSE )
-dattestOr     <- fread(file = "test_set.csv", data.table = FALSE  )
+dattrainOr    <- fread(file = "./data/training_set.csv", data.table = FALSE )
+dattrainLabOr <- fread(file = "./data/training_set_labels.csv", data.table = FALSE )
+dattestOr     <- fread(file = "./data/test_set.csv", data.table = FALSE  )
 
 
 # EDA--- (Exploratory Data Analysis) - hecho con inspectdf
@@ -61,7 +62,7 @@ show_plot(x)
 #---- Corregir estas deficiencias.
 # Vamos a hacer un modelo con las variables numericas
 # Vamos a la playa!
-datnum_df <- dattrainOr %>% select(is.numeric)
+datnum_df <- dattrainOr %>% select(where(is.numeric))
 
 # Variable objetivo?
 # Ante la duda del mismo orden de etiquetas - hago merge
