@@ -15,6 +15,8 @@ suppressPackageStartupMessages({
   library(ranger)         # Fast randomForest
   library(forcats)        # Tratar variables categoricas
   library(mcen)
+  library(missRanger)
+  library(mice)
 })
 
 dattrainOr    <- fread(file = "./data/training_set.csv", data.table = FALSE )
