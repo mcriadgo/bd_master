@@ -17,6 +17,7 @@ suppressPackageStartupMessages({
   library(tuneRanger)
   library(bnstruct)
   library(xgboost)
+  library(data.table)
   
 })
 
@@ -89,10 +90,6 @@ table(dattrainOrlab$tsh0flag)
 
 #same for gps_height
 
-dattrainOrlab$gps0flag <- 0
-dattrainOrlab$gps0flag[dattrainOrlab$gps_height==0]<-1
-table(dattrainOrlab$gps0flag)
-
 dattrainOrlab$year0flag<-0
 dattrainOrlab$year0flag[dattrainOrlab$fe_age==max(dattrainOrlab$construction_year)]<-1
 
@@ -106,9 +103,6 @@ dattestOr$tsh0flag[dattestOr$amount_tsh==0]<-1
 
 #same for gps_height
 
-dattestOr$gps0flag <- 0
-dattestOr$gps0flag[dattestOr$gps_height==0]<-1
-
 dattestOr$year0flag<-0
 dattestOr$year0flag[dattestOr$fe_age==max(dattestOr$construction_year)]<-1
 
@@ -116,25 +110,53 @@ dattestOr$pop_log <- log(dattestOr$population +1)
 dattestOr$amount_tsh <- log(dattestOr$amount_tsh+1)
 dattestOr$amount_tsh[is.na(dattestOr$amount_tsh)] <- 1
 
+dattrainOrlab_dt <- as.data.table(dattrainOrlab)
+dattestOr_dt <- as.data.table(dattestOr)
+
+dattrainOrlab_dt[ , fe_funder := .N , by = funder ]
+dattrainOrlab_dt[ , fe_installer := .N , by = installer ]
+dattrainOrlab_dt[ , fe_quantity := .N , by = quantity ]
+dattrainOrlab_dt[ , fe_ward := .N , by = ward ]
+
+dattestOr_dt[ , fe_funder := .N , by = funder ]
+dattestOr_dt[ , fe_installer := .N , by = installer ]
+dattestOr_dt[ , fe_quantity := .N , by = quantity ]
+dattestOr_dt[ , fe_ward := .N , by = ward ]
+
 
 ### Quito columnas
-input_data <- subset(dattrainOrlab,,-c(extraction_type_group,gps_height, amount_tsh, construction_year, population, region_code))
+input_data <- subset(dattrainOrlab_dt,,-c(extraction_type_group,
+                                       amount_tsh, population, region_code, ward, installer, funder))
 
 
 ######### TRAIN MODEL ##############
-input_data$status_group <-as.factor(dattrainOrlab$status_group)
+input_data$status_group <-as.factor(dattrainOrlab_dt$status_group)
 my_model_final <- ranger( 
   status_group ~., 
   importance = 'impurity',
   data = input_data,
-  num.trees = 1500
+  mtry=4
 )
 # **Estimacion** del error / acierto **esperado**
 acierto <- 1 - my_model_final$prediction.error
 acierto   #### 
 
 #tunning
-train_features <- select(dattrainOrlab,-status_group)
-tune <- tuneRF(train_features, dattrainOrlab$status_group, 
-       ntreeTry=500, stepFactor=2, improve=0.05)
-print(tune)
+train_features <- select(input_data,-status_group)
+tune_df <- tuneRF(train_features, input_data$status_group, 
+       ntreeTry=1500, stepFactor=2, improve=0.005, dobest=TRUE)
+print(tune)  
+
+
+
+####### SUBMISSION #########
+#------------ Prediccion
+my_pred <- predict(my_model_final, dattestOr_dt)
+
+#------ Submission
+my_sub <- data.table(
+  id = dattestOr_dt$id,
+  status_group = my_pred$predictions
+)
+# guardo submission
+fwrite(my_sub, file = "TercerIntento.csv" )

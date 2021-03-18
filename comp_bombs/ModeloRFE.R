@@ -14,10 +14,6 @@ suppressPackageStartupMessages({
   library(revgeo)         # para cambiar longitude, latitude por ciudad
   library(miceRanger)
   library(randomForest)
-  library(caret)
-  library(tuneRanger)
-  library(bnstruct)
-  library(xgboost)
   
 })
 
@@ -42,7 +38,7 @@ numlev_df %>% arrange(levels)
 
 #--- Me quedo con las castegorias que tienen valores de > 1 y < 1000
 vars_gd <- numlev_df %>%
-  filter(levels < 2200, levels > 1) %>% 
+  filter(levels < 100, levels > 1) %>% 
   select(vars)
 datcat_gd <- datcat_df[ , vars_gd$vars]
 
@@ -76,57 +72,42 @@ dattestOr$fe_age <- ifelse(
 
 dattrainOrlab$num_private <- NULL  # porque tiene muchos nulos
 
+dattrainOrlab$pop_cat <- ifelse( 
+  dattrainOrlab$population <= 100, 
+  'Poco_Poblado', 'Muy_Poblado')
+
+dattestOr$pop_cat <- ifelse( 
+  dattestOr$population <= 100, 
+  'Poco_Poblado', 'Muy_Poblado')
+
 dattrainOrlab$fe_dist <- sqrt( dattrainOrlab$longitude^2 + dattrainOrlab$latitude^2)
 dattestOr$fe_dist     <- sqrt( dattestOr$longitude^2 + dattestOr$latitude^2)
 
+dattrainOrlab$date_recorded <- as.Date(dattrainOrlab$date_recorded, "%Y-%m-%d")
+dattestOr$date_recorded <- as.Date(dattestOr$date_recorded, "%Y-%m-%d")
+
+dattrainOrlab$month_recorded <- month(dattrainOrlab$date_recorded)
+dattestOr$month_recorded <- month(dattestOr$date_recorded)
 
 
-dattrainOrlab.task = makeClassifTask(data = dattrainOrlab, target = "status_group")
-estimateTimeTuneRanger(dattrainOrlab.task)
-# Tuning
-res = tuneRanger(iris.task, measure = list(multiclass.brier), num.trees = 1000, 
-                 num.threads = 2, iters = 70, save.file.path = NULL)
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+set.seed(500)
+tunegrid <- expand.grid(.mtry=c(1:15))
+rf_gridsearch <- train(status_group~., data=dattrainOrlab, method="rf", metric='accuracy', tuneGrid=tunegrid, trControl=control)
+print(rf_gridsearch)
+plot(rf_gridsearch)
 
 
 dattrainOrlab$status_group <- as.factor(dattrainOrlab$status_group)
 dattrainOrlab$date_recorded <- dattrainOr$date_recorded
-
-
-input_data <- subset(dattrainOrlab,,-c(extraction_type_group,extraction_type_class, 
-                                       management_group, quality_group, amount_tsh, construction_year))
-
-
-input_data$status_group <-as.factor(input_data$status_group)
 my_model_final <- ranger( 
-  status_group ~., 
+  status_group ~ . , 
   importance = 'impurity',
-  data = input_data,
-  num.trees = 1000,
-  mtry=9
+  data = dattrainOrlab
 )
 # **Estimacion** del error / acierto **esperado**
 acierto <- 1 - my_model_final$prediction.error
 acierto   #### 
-input_data <- lapply(input_data, as.factor)
-
-#hypertunning
-grid <-  expand.grid(mtry = c(2,5,6,8), splitrule=c('gini'), min.node.size=1)
-
-fitControl <- trainControl(method = "CV",
-                           number = 5,
-                           verboseIter = TRUE)
-
-fit = caret::train(
-  status_group ~.,
-  data=input_data,
-  method = 'ranger',
-  tuneGrid = grid,
-  trControl = fitControl,
-  verbose=TRUE,
-  ntrees=1000
-)
-print(fit)
-
 
 #--- Pintar importancia de variables
 impor_df <- as.data.frame(my_model_final$variable.importance)
@@ -140,7 +121,6 @@ ggplot(impor_df, aes(fct_reorder(vars, Importance), Importance)) +
   labs(x = 'Variables', y = 'Importancia', title = 'Importancia Variables') +
   theme_bw()
 ggsave('./charts/modelo_SegundoIntentoFinal.png')
-
 
 
 ####### SUBMISSION #########

@@ -1,0 +1,269 @@
+---
+title: "CodigoFinal"
+output: html_document
+author: Juan Manuel del Valle, Irene Berros, Arnau Fabregat y Marta Criado
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de librerías
+
+```{r cars, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(dplyr)          # Manipulacion de datos 
+  library(data.table)     # Leer y procesar ultra-rapido
+  library(ggplot2)        # La librería grafica
+  library(inspectdf)      # EDAs automaticos
+  library(ranger)         # Fast randomForest
+  library(forcats)        # Tratar variables categoricas
+  library(tictoc)         # Calcular tiempos
+  library(missRanger)     # Fast imputation of NAs --- Finalmente no se usa
+  library(lubridate)      # Tratar formato fecha
+  library(Hmisc)          # para hacer el describe
+})
+```
+
+## Lectura de ficheros
+```{r}
+dattrainOr    <- fread(file = "./data/training_set.csv", data.table = FALSE )
+dattrainLabOr <- fread(file = "./data/training_set_labels.csv", data.table = FALSE )
+dattestOr     <- fread(file = "./data/test_set.csv", data.table = FALSE  )
+```
+
+## Exploratory Data Analysis (EDA)
+
+Como se puede apreciar en la gráfica hay una columna `recorded_by` que es constante pues solo tiene un valor, esta columna la eliminaremos del modelo ya que no aporta valor. También hay varias columnas como `subvillage`y `ward`que tienen demasiadas categorías. Analizaremos más adelante el número de variables categóricas que introducir al modelo dependiendo de el número de categorías que tengan.  
+```{r}
+x <- inspect_cat(dattrainOr)
+show_plot(x)
+```
+
+En cuanto a las variables numéricas, la mayoría no tienen mucha correlación entre ellas excepto el código de distrito y el código de la región y el año de construcción y la altura del gps. Dado que vamos a utilizar un clasificador como el random forest o el XGBoost que no son lineales, la correlación no es un factor a tener demasiado en cuenta.   
+```{r}
+x <- inspect_cor(dattrainOr)
+show_plot(x)
+```
+
+Aquí podemos volver a observar que la columna `recorded_by` tiene un solor valor y que hay otras cuatro columnas más que tienen una clase predominante por tanto estarán desbalanceadas.  
+```{r}
+x <- inspect_imb(dattrainOr)
+show_plot(x)
+```
+
+Las únicas columnas en las que existen valores NaN son `public_meeting`y `permit` y es un porcentaje de NaN muy poco significativo. Esto se analizará más en detalle para ciertas columnas puesto que puede haber variables que no tengan valor missing como tal pero que tengan outliers o valores nulos que puedan ser recodificados como missing.  
+
+```{r}
+x <- inspect_na(dattrainOr)
+show_plot(x)
+```
+
+Por último, en los siguientes histogramas podemos apreciar que las columnas `amount_tsh`, `num_private` y `population` tienen una distribución asimétrica y por tanto es posible que una transformación logarítmica mejore su significación en el modelo. Aunque tratándose de modelos no lineales, una distribución normal de una variable no tendría por qué afectar al modelo.  
+
+También se puede apreciar que las longitudes de las ubicaciones de las bombas de aguas están en torno al 30 y 40 y las latitudes son negativas en su mayoría. Estos valores son normales puesto que Tanzania se encuentra entre el meridiano 30 y 40 y muy cercano al plano ecuatorial (paralelo 0).
+Los valores de longitud cercanos al 0 serán valores atípicos
+```{r}
+x <- inspect_num(dattrainOr)
+show_plot(x)
+```
+
+## Union de conjuntos de datos
+Para poder realizar todas las transformaciones de manera conjunta, uniremos los dos datasets (train y test) 
+```{r}
+alldata <- merge(dattrainOr, dattestOr, all = T, sort = F)
+```
+
+## Variables categóricas
+Creamos un dataframe que nos indica cuantos niveles tiene cada columna categórica. 
+```{r}
+datcat_df <- alldata %>% select(where(is.character))
+datnum_df <- alldata %>% select(where(is.numeric))
+
+
+numlev_df <- data.frame()
+for (i in 1:ncol(datcat_df)) {
+  col_tmp <- datcat_df[, i]
+  num_lev <- length(unique(col_tmp))
+  numlev_df[i, 1] <- names(datcat_df)[i]
+  numlev_df[i, 2] <- num_lev
+}
+names(numlev_df) <- c('vars', 'levels')
+numlev_df %>% arrange(levels)
+```
+Nosotros hemos decidido introducir en el modelo todas las variables categóricas que tengan menos de 2200 categorías distintas ya que consideramos que variables como el fundador de la bomba de agua (funder) puede tener significación en el modelo.
+```{r}
+vars_gd <- numlev_df %>%
+  filter(levels < 2200, levels > 1) %>% 
+  select(vars)
+datcat_gd <- datcat_df[ , vars_gd$vars]
+```
+
+Hay varias columnas que tienen nombres muy similares y por ello es posible que contengan la misma información o una información muy parecida. Analizaremos `payment_type` con `payment`
+```{r}
+describe(datcat_df$payment_type)
+```
+```{r}
+describe(datcat_df$payment)
+```
+Para este caso las columnas tienen un nombre distinto pero tienen el mismo significado por tanto eliminamos una de ellas. Para el caso de `quantity_group` y `quantity`, ambas columnas son idénticas como se demuestra a continuación.
+```{r}
+all.equal(datcat_df$quantity_group, datcat_df$quantity)
+```
+
+```{r}
+datcat_gd$payment_type <- NULL
+datcat_gd$quantity_group <- NULL
+```
+
+Una vez hemos realizado el análisis de categóricas unimos el dataframe de numéricas con el de categóricas
+```{r}
+datnumcat_df <- cbind(datnum_df, datcat_gd)
+```
+
+## Columnas númericas de tipo fecha  
+Introducimos en el modelo la columna `date_recorded` y creamos tres columnas a partir de esta. 
+La primera columna creada genera una diferencia entre el máximo de la columna `date_recorded` y cada valor de la misma. La segunda columna contiene el mes de `date_recorded`. 
+La última columna es una diferencia entre el máximo de `construction_year` y cada valor de la misma.
+```{r}
+datnumcat_df$date_recorded <- alldata$date_recorded
+datnumcat_df$fe_date_recorded <- as.numeric(as.Date('2013-12-03') - as.Date(alldata$date_recorded))
+datnumcat_df$fe_month <- month(ymd(datnumcat_df$date_recorded))
+datnumcat_df$fe_age <- 2014 - datnumcat_df$construction_year
+```
+
+Creamos una nueva columna con la fórmula del teorema de Pitágoras y eliminamos el offset (el valor 30)
+```{r}
+datnumcat_df$fe_dist <- sqrt(datnumcat_df$longitude^2 + datnumcat_df$latitude^2) - 30
+```
+
+## Frecuencias de columnas categóricas
+Creamos dos nuevas columnas calculando la frecuencia con la que aparece cada categoría en cada variable, para las variables de `funder` y `quantity`
+```{r}
+datnumcat_dt <- as.data.table(datnumcat_df)
+
+datnumcat_dt[ , fe_funder := .N , by = funder ]
+datnumcat_dt[ ,  fe_quantity := .N , by = quantity ]
+
+datnumcat_df_imp <- as.data.frame(datnumcat_dt)
+```
+
+## Split de ambos conjuntos  
+Asignamos el 80% de los datos al entrenamiento y el 20% restante al test
+```{r}
+train_idx <- nrow(datnumcat_df_imp)*0.8
+dattrainOr_imp <- datnumcat_df_imp[1:train_idx,]
+dattestOr_imp <- datnumcat_df_imp[(train_idx+1):nrow(datnumcat_df_imp),]
+```
+
+Unimos el dataframe de entrenamiento con la columna a predecir
+```{r}
+dattrainOrlab_imp <- merge(
+  dattrainOr_imp, dattrainLabOr,
+  by.x = c('id'), by.y = c('id'),
+  sort = FALSE
+)
+dattrainOrlab_imp$status_group <- as.factor(dattrainOrlab_imp$status_group)
+```
+
+
+## Tuneo de hiperparámetros  
+Se tunean el número de árboles y el número de variables con las que se entrena cada árbol dentro del random forest (parámetro mtry).
+El paramétro mtry por defecto tiene el valor $sqrt(#variables en el modelo)$ en un problema de clasificación, así que oscilaremos el valor entre 4 y 5. El número de árboles no puede ser muy elevado para no sobrentrenar los datos
+```{r}
+my_ntree <- c(450,500,550,600)
+my_mtry  <- c(4,5)
+my_pars  <- expand.grid(my_ntree, my_mtry)
+names(my_pars) <- c('myntree', 'mymtry')
+my_pars$acierto <- 0
+
+for (i in 1:nrow(my_pars)) {
+  my_model <- ranger(
+    status_group ~ . ,
+    importance = 'impurity',
+    num.trees = my_pars$myntree[i],
+    mtry = my_pars$mymtry[i],
+    data = dattrainOrlab_imp,
+    seed = 12345
+  )
+  acierto <- 1 - my_model$prediction.error
+  my_pars$acierto[i] <- acierto
+}
+
+```
+
+```{r}
+plot(my_pars$myntree[1:3], my_pars$acierto[1:3], type='b', col='green')
+lines(my_pars$myntree[5:8], my_pars$acierto[5:8],type='b', col='blue')
+legend('bottomright', legend=c("mtry=4", "mtry=5"),
+       col=c("green", "blue"), lty=1:2, cex=0.8)
+```
+
+
+## Modelo 
+Elegimos 620 árboles después de varias pruebas y la semilla 67583 
+```{r}
+my_model <- ranger( 
+  status_group ~ . , 
+  importance = 'impurity',
+  num.trees = 620,
+  mtry = 5,
+  data = dattrainOrlab_imp,
+  seed = 67583
+)
+```
+
+```{r}
+acierto <- 1 - my_model$prediction.error
+acierto
+```
+
+## Importancia de las variables
+```{r}
+impor_df <- as.data.frame(my_model$variable.importance)
+names(impor_df)[1] <- c('Importance')
+impor_df$vars <- rownames(impor_df)
+rownames(impor_df) <- NULL
+
+ggplot(impor_df, aes(fct_reorder(vars, Importance), Importance)) +
+  geom_col(group = 1, fill = "darkred") +
+  coord_flip() + 
+  labs(x = 'Variables', y = 'Importancia', title = 'Importancia Variables') +
+  theme_bw()
+```
+
+
+## Submission de los datos de test
+```{r}
+my_pred <- predict(my_model, dattestOr_imp)
+
+#------ Submission
+my_sub <- data.table(
+  id = dattestOr_imp$id,
+  status_group = my_pred$predictions
+)
+fwrite(my_sub, file = "17_catfreqs_.csv" )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
